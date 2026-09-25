@@ -338,7 +338,7 @@ preamble() {
   elif [[ $5 == rw ]]; then
     echo 'Test your changes, stage specific files and commit; no blanket staging.'
   fi
-  echo 'Your final message is your deliverable.'
+  echo 'Your final message is your deliverable: put the complete answer in it. Board posts are not read as your answer, so never end with only "posted" or a pointer to the board.'
 }
 run_one() {
   local id=$1 model=$2 mode=$3 wd=$4 prompt=$5 md=$6 engine=${7:-} effort=${8:-} rc=0 base='' common extra owned=0 expected='' root='' autocommitted='[]'
