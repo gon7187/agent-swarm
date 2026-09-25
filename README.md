@@ -153,9 +153,10 @@ Or just say "ask all models" / "use the swarm" in plain language; the skill desc
 
 | Env var | Purpose |
 |---|---|
-| `SWARM_RW_ALLOW` | Extra tools for rw Claude agents, space-separated, e.g. `"Bash(uv run pytest:*)"` |
+| `SWARM_RW_ALLOW` | Extra tools for rw Claude agents, one pattern per line, e.g. `$'Bash(uv run pytest:*)\nBash(npm test:*)'` |
 | `SWARM_UNSAFE_RW=1` | rw Claude agents run with `--dangerously-skip-permissions`. Full host access; see [Safety](#safety-model) |
 | `SWARM_INHERIT_CONFIG=1` | Let workers load your user config (hooks, output style, MCP servers, global instructions) |
+| `SWARM_TERMINAL` | Terminal launcher used by `-W` to open the live view (default `xdg-terminal-exec`) |
 | `SWARM_CLAUDE_BIN`, `SWARM_CODEX_BIN` | Override the harness binaries (used by the tests to stub them) |
 | `SWARM_CLAUDE_MODELS`, `SWARM_CODEX_MODELS` | Override the model lists |
 | `SWARM_DEPTH` | Nesting guard, set automatically for workers |
@@ -208,7 +209,7 @@ Inside a worker, `post` ignores the `DIR` and `FROM` arguments and writes to the
 | Where it writes | Nothing in your project | Its own git worktree and branch |
 
 - **Default is read-only.** Agents can read your code and the web, run read-only git commands and talk on the board. `rg` is deliberately not allowed (`rg --pre` executes commands); Grep covers search.
-- **rw is scoped, not unlimited.** rw Claude agents can edit files and commit, nothing else. Add tools per project with `SWARM_RW_ALLOW`, e.g. `SWARM_RW_ALLOW='Bash(uv run pytest:*) Bash(npm test:*)'`.
+- **rw is scoped, not unlimited.** rw Claude agents can edit files and commit, nothing else. Add tools per project with `SWARM_RW_ALLOW`, e.g. `SWARM_RW_ALLOW=$'Bash(uv run pytest:*)\nBash(npm test:*)'`.
 - **`SWARM_UNSAFE_RW=1` removes all checks.** Claude then runs with `--dangerously-skip-permissions`, which gives the agent the same access to your machine as your user account; a worktree only limits where the changes land, not what the process can reach. The script prints a warning before starting. Use it only in a disposable environment.
 - **Worktree and permissions are separate.** A worktree decides *where* an agent writes; `mode` decides *whether* it may write. Contradictory combinations are rejected instead of silently escalated.
 - **Workers do not inherit your config.** Claude and Codex workers start without your user-level settings (Codex with `--ignore-user-config`). Your hooks, output style, MCP servers and global instructions do not leak into answers (or cost). `SWARM_INHERIT_CONFIG=1` turns this off.
