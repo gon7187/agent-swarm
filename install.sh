@@ -96,7 +96,7 @@ command -v claude >/dev/null 2>&1 || command -v codex >/dev/null 2>&1 || \
 
 # --- locate skill/ source: local checkout or fresh clone ---
 CLEANUP_DIR=""
-cleanup() { [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR"; }
+cleanup() { if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi; }
 trap cleanup EXIT
 
 SOURCE="${BASH_SOURCE[0]:-}"
