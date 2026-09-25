@@ -220,7 +220,8 @@ touch "$T/judge-no-output"
 reject "$S" judge "$T/retry" -S gpt-other
 [[ $(cat "$T/retry/final.rc") == 65 && ! -s $T/retry/final.md ]] || fail stale-answer
 rm "$T/judge-no-output"
-"$S" all -w -r 1 -o "$T/work" hello > "$T/work-summary"
+"$S" all -w -r 1 -o "$T/work" hello > "$T/work-summary" 2> "$T/work-err"
+[[ $(grep -c "rw Claude workers cannot run tests" "$T/work-err") == 1 ]] || fail rw-allow-note-once
 has "$T/work-summary" 'git merge -- swarm/work/a'
 [[ $(git worktree list --porcelain | grep -c '^worktree ') == 3 ]] || fail worktrees
 [[ $(jq -s length "$T/work/manifest.jsonl") == 2 ]] || fail manifests
@@ -648,4 +649,17 @@ rc_is 4 loop -m sonnet -U 0.35 -o "$T/loop-usd" hello
 has "$T/hundred.status" 'STATE COUNT'
 grep -Eq '^done rc=0: [0-9]+$' "$T/hundred.status" || fail status-aggregate
 [[ $(wc -l < "$T/hundred.status") -lt 10 ]] || fail status-too-long
+# --- chat view (messenger-style watch): bubbles, reply quotes, drop-out notices, --plain fallback.
+C="$T/chat"; mkdir -p "$C/a/a1" "$C/a/a2" "$C/r1"
+printf 'a1\tsonnet\t\na2\tgpt-test\thigh\n' > "$C/anon.map"
+jq -cn '{ts:"2026-01-01T10:00:00.000000000Z",from:"a1",to:"all",msg:"first idea\\nsecond line"}' > "$C/a/a1/outbox.jsonl"
+jq -cn '{ts:"2026-01-01T10:01:00.000000000Z",from:"a2",to:"a1",msg:"REFUTED: wrong"}' > "$C/a/a2/outbox.jsonl"
+echo 1 > "$C/r1/a2.rc"; cp "$FIXTURES/codex-usage-limit.jsonl" "$C/r1/a2.log"
+chat_out=$("$S" watch "$C" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g')
+grep -q '╭─ a1 · sonnet ' <<< "$chat_out" || fail chat-bubble
+grep -q 'a2 · gpt-test@high' <<< "$chat_out" || fail chat-effort-label
+grep -q '↩ a1: first idea second line' <<< "$chat_out" || fail chat-reply-quote
+grep -q '│ second line' <<< "$chat_out" || fail chat-multiline
+grep -q 'a2 dropped out (usage limit)' <<< "$chat_out" || fail chat-dropout
+plain_out=$("$S" watch "$C" --plain); grep -q "^AGENT STATE" <<< "$plain_out" || fail watch-plain
 printf 'All tests passed.\n'

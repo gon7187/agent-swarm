@@ -11,7 +11,7 @@
 #   swarm.sh stop DIR                     ask a loop to stop between iterations
 #   swarm.sh post DIR FROM "text" [TO]    append to the sender's outbox
 #   swarm.sh read DIR [ME]                merge outboxes, optionally filter
-#   swarm.sh status DIR | watch DIR | wait DIR [-t SEC]
+#   swarm.sh status DIR | watch DIR [--plain] | wait DIR [-t SEC]
 #   swarm.sh clean DIR [--discard BRANCH ...]
 # Model spec: model[@effort][*count], e.g. "claude-sonnet-5@high gpt-6*3".
 # Options: -j jobs (6), -t timeout_s (1800), -o NEW_DIR, -q minimum valid answers
@@ -372,6 +372,10 @@ $prompt"
       cmd+=(--dangerously-skip-permissions)
     else
       if [[ $mode == rw ]]; then cmd+=(--permission-mode acceptEdits); else cmd+=(--permission-mode dontAsk); fi
+      # A writer that cannot run anything codes blind: say so once per run.
+      if [[ $mode == rw && -z ${SWARM_RW_ALLOW:-} && ! -e $dir/.rw-allow-warned ]] && : > "$dir/.rw-allow-warned"; then
+        printf '%s\n' "swarm: note: rw Claude workers cannot run tests or linters; allow them, e.g. SWARM_RW_ALLOW=\$'Bash(bash tests/test.sh:*)\\nBash(shellcheck:*)'" >&2
+      fi
       cmd+=(--allowedTools Read Grep Glob WebSearch WebFetch
         "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git blame:*)"
         "Bash($SELF post:*)")
@@ -1000,7 +1004,11 @@ case $sub in
   post) (($# >= 3 && $# <= 4)) || die 'post DIR FROM TEXT [TO]'; post "$@"; exit ;;
   read) (($# >= 1 && $# <= 2)) || die 'read DIR [ME]'; read_board "$@"; exit ;;
   status) (($# == 1)) || die 'status DIR'; status "$1"; exit ;;
-  watch) (($# == 1)) || die 'watch DIR'; watch_run "$1"; exit ;;
+  watch)
+    [[ $# == 1 || ( $# == 2 && $2 == --plain ) ]] || die 'watch DIR [--plain]'
+    # Messenger-style view when available; --plain (or no gawk) keeps the status table.
+    if [[ ${2:-} != --plain && -x ${SELF%/*}/chat.sh ]] && command -v gawk >/dev/null; then exec "${SELF%/*}/chat.sh" "$1"; fi
+    watch_run "$1"; exit ;;
   clean) (($# >= 1)) || die 'clean DIR [--discard BRANCH ...]'; clean "$@"; exit ;;
   wait) (($# >= 1)) || die 'wait DIR [-t SEC]'; wait_run "$@"; exit ;;
   mass) sub=all; set -- -r 1 "$@" ;; # alias: one independent round, then the judge
