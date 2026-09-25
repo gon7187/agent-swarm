@@ -167,7 +167,7 @@ board_json() {
 read_board() {
   board_json "$1" | jq -r --arg me "${2:-}" '.[] |
     select($me == "" or .to == "all" or .to == $me or .from == $me) |
-    "[\(.ts)] \(.from) -> \(.to): \(.msg)"'
+    "[\(.ts)] \(.from) -> \(.to): \(.msg | gsub("[\u0000-\u0008\u000b-\u001e\u007f]"; ""))"'
 }
 status() {
   local dir=$1 f rc cost tokens total=0 unknown=0 known=0
@@ -498,6 +498,23 @@ run_pass() {
     todo=("${retry[@]}")
   done
 }
+# Single-call guard for judge sessions (final judge, loop judge, tournament sub-judges):
+# same dead-engine skip, cooldown wait and rc-76 retry (up to 3 times) as run_pass.
+run_guarded() {
+  local id=$1 model=$2 mode=$3 wd=$4 prompt=$5 md=$6 engine=${7:-} effort=${8:-} eng pass rc
+  eng=${engine:-$(engine_of "$model")}
+  if [[ -s $dir/.backoff/$eng.dead ]]; then
+    : > "$md"; echo 77 > "${md%.md}.rc"; log_event skip "$md" 77 "$eng usage exhausted"; return 77
+  fi
+  for ((pass=0; ; pass++)); do
+    while cooling "$eng"; do sleep 1; done
+    [[ ! -e ${md%.md}.rc ]] || stash_attempt "${md%.md}"
+    rc=0; run_one "$id" "$model" "$mode" "$wd" "$prompt" "$md" "$engine" "$effort" || rc=$?
+    ((rc == 76 && pass < 3)) || break
+    log_event retry "$md" 76 "transient limit; pass $((pass + 1))"
+  done
+  return "$rc"
+}
 collect_results() {
   local f
   ok=() bad=()
@@ -589,7 +606,7 @@ tournament() {
       members=(); for ((i=g-1; i<${#pool[@]}; i+=n)); do members+=("${pool[$i]}"); done
       printf '%s\n' "${members[@]}" > "$jdir/L$level/g$g.members"
       throttle
-      independent=2 run_one "judge-L$level-g$g" "$synth" ro "$PROJECT" "$(subjudge_prompt "$level" "$g" "$note" "${members[@]}")" "$jdir/L$level/g$g.md" '' "$synth_effort" &
+      independent=2 run_guarded "judge-L$level-g$g" "$synth" ro "$PROJECT" "$(subjudge_prompt "$level" "$g" "$note" "${members[@]}")" "$jdir/L$level/g$g.md" '' "$synth_effort" &
     done
     wait
     next=()
@@ -641,7 +658,7 @@ $(jq -sc 'group_by(.id) | map(last)' "$dir/manifest.jsonl")
 Finish with exactly WINNER: <branch> for the recommended branch, or WINNER: NONE; do not merge."
   fi
   [[ ! -f $dir/PARTIAL ]] || prompt+=$'\nThis is a PARTIAL run: explicitly disclose the missing evidence.'
-  independent=0 run_one judge "$synth" ro "$PROJECT" "$prompt" "$dir/final.md" '' "$synth_effort" &
+  independent=0 run_guarded judge "$synth" ro "$PROJECT" "$prompt" "$dir/final.md" '' "$synth_effort" &
   judge_pid=$!
   local judge_rc=0
   wait "$judge_pid" || judge_rc=$?
@@ -688,7 +705,7 @@ write_result() {
     local -a usages=("$dir"/it*/*.usage "$dir"/it*/j/*/*.usage)
     jq --arg stop "${stop_reason:-interrupted}" --slurpfile rows <(cat "$dir/loop.jsonl" 2>/dev/null || true) \
       --slurpfile u <(cat /dev/null "${usages[@]}") '. + {kind:"loop",ideal:($stop == "ideal"),stop_reason:$stop,
-      iterations:($rows|length),best:([$rows[] | select(.best != "INCUMBENT") | "it\(.it)/\(.best)"] | last),
+      iterations:($rows|length),best:([$rows[] | select(.best != "INCUMBENT") | if .best == "MERGED" then "it\(.it)/merged.md" else "it\(.it)/\(.best)" end] | last),
       score_history:[$rows[] | if .best == "INCUMBENT" then .incumbent_score else .score end],
       cost:{known_usd:([$u[].cost | numbers] | add // 0),unknown_calls:([$u[] | select(.cost == null)] | length)}}' \
       "$dir/result.json.tmp" > "$dir/result.json.tmp2"
@@ -837,6 +854,7 @@ decision_schema() {
     [need(.verdict | IN("STOP","CONTINUE","PAUSE"); "verdict must be STOP, CONTINUE or PAUSE"),
      need([.score,.incumbent_score] | all(type == "number" and floor == . and . >= 0 and . <= 100); "score and incumbent_score must be integers 0-100"),
      need(.best == "INCUMBENT" or .best == "MERGED" or (.best as $b | any($ids[]; . == $b)); "best must be INCUMBENT or a valid candidate id: \($ids | join(" "))"),
+     need(.best == "INCUMBENT" or .score >= .incumbent_score; "a new best must score at least the incumbent"),
      need((.best == "MERGED" and $merge == 0) | not; "MERGED is not enabled"),
      need(($k == 1 and .best == "INCUMBENT") | not; "iteration 1 has no incumbent"),
      need((.verdict == "STOP" and .best == "MERGED") | not; "no STOP in the iteration that picks MERGED"),
@@ -861,7 +879,7 @@ loop_judge() {
   p=$(loop_judge_prompt "$k")
   for attempt in 1 2; do
     [[ ! -e $base.rc ]] || stash_attempt "$base"
-    independent=0 run_one judge "$synth" ro "$PROJECT" "$p${reason:+
+    independent=0 run_guarded judge "$synth" ro "$PROJECT" "$p${reason:+
 DECISION FORMAT ERROR: $reason}" "$base.md" '' "$synth_effort" &
     wait "$!" || true
     reason=$(decision_error "$k")
@@ -927,6 +945,9 @@ finish_loop() {
   [[ $mode != rw || ! -s $dir/loop.jsonl ]] || winner=$(tail -n 1 "$dir/loop.jsonl" | jq -r '.best_branch // ""')
   status "$dir"; branches
   echo "loop: $stop_reason after $(if [[ -s $dir/loop.jsonl ]]; then jq -s length "$dir/loop.jsonl"; else echo 0; fi) iterations" >&2
+  case $stop_reason in
+    max-iter|max-sessions|max-usd) echo 'loop: this cap (-I/-B/-U) is fixed for this run; resume hits it again — start a new run to raise it' >&2 ;;
+  esac
   [[ ! -s $dir/final.md ]] || echo "final: $dir/final.md"
   exit "$1"
 }
@@ -940,7 +961,7 @@ loop_run() {
     [[ ! -f $dir/STOP ]] || finish_loop 4 stop
     ((max_iter == 0 || k <= max_iter)) || finish_loop 4 max-iter
     rcs=("$dir"/it*/*.rc "$dir"/it*/j/*/*.rc)
-    ((max_sessions == 0 || ${#rcs[@]} + ${#ids[@]} + 1 <= max_sessions)) || finish_loop 4 max-sessions
+    ((max_sessions == 0 || ${#rcs[@]} + ${#ids[@]} + 1 + $( ((mass)) && subjudge_count "${#ids[@]}" || echo 0) <= max_sessions)) || finish_loop 4 max-sessions
     [[ $max_usd == 0 || ! -s $dir/loop.jsonl ]] ||
       jq -se --argjson u "$max_usd" '([.[].cost_usd] | add) < $u' "$dir/loop.jsonl" >/dev/null || finish_loop 4 max-usd
     mkdir -p "$dir/it$k"
@@ -1019,7 +1040,7 @@ case $sub in
     watch_run "$1"; exit ;;
   clean) (($# >= 1)) || die 'clean DIR [--discard BRANCH ...]'; clean "$@"; exit ;;
   wait) (($# >= 1)) || die 'wait DIR [-t SEC]'; wait_run "$@"; exit ;;
-  mass) sub=all; set -- -r 1 "$@" ;; # alias: one independent round, then the judge
+  mass) sub=all; was_mass=1; set -- -r 1 "$@" ;; # alias: one independent round, then the judge
   all|loop|run|judge|resume) ;;
   *) die "unknown command: $sub (see --help)" ;;
 esac
@@ -1032,6 +1053,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 jobs_max=6 timeout_s=1800 out='' rounds=2 models='' synth='' synth_effort='' rw=0 quorum='' watch_window=0 detached=0
 stall_k=3 max_iter='' max_sessions='' max_usd=0 merge=0 kind=$sub assume_yes=0 set_r=0 loop_opts='' refine='' mass=0
+was_mass=${was_mass:-0}
 declare -A agent_prompt=()
 wide_ids=() refine_ids=()
 for n in "${SWARM_MASS_AT:-12}" "${SWARM_CONFIRM_OVER:-20}" "${SWARM_BACKOFF_BASE:-30}"; do
@@ -1116,7 +1138,9 @@ while getopts ':j:t:o:r:m:S:q:K:I:B:U:X:wWdyMh' opt; do
     d) detached=1 ;; q) quorum=$OPTARG ;; W) watch_window=1 ;; y) assume_yes=1 ;;
     K) stall_k=$OPTARG loop_opts+=K ;; I) max_iter=$OPTARG loop_opts+=I ;; B) max_sessions=$OPTARG loop_opts+=B ;;
     M) merge=1 loop_opts+=M ;; U) max_usd=$OPTARG loop_opts+=U ;; X) refine=$OPTARG loop_opts+=X ;;
-    h) help_text; exit 0 ;; *) die 'invalid option or missing value (see --help)' ;;
+    h) help_text; exit 0 ;;
+    :) die "option -$OPTARG requires an argument" ;;
+    \?) die "invalid option: -$OPTARG (see --help)" ;;
   esac
 done
 shift $((OPTIND - 1))
@@ -1125,6 +1149,7 @@ for n in "$jobs_max" "$timeout_s" "$rounds" "${quorum:-1}" "$stall_k" "${max_ite
   [[ $n =~ ^[1-9][0-9]*$ && ${#n} -le 8 ]] || die 'jobs, timeout, rounds, quorum, -K, -I and -B must be positive integers'
 done
 max_iter=${max_iter:-0} max_sessions=${max_sessions:-0}
+[[ $was_mass == 0 || $rounds == 1 ]] || die 'mass has no rounds (-r); it always runs a single round'
 [[ $sub == loop || -z $loop_opts ]] || die '-K, -I, -B, -U, -M and -X apply only to loop'
 [[ $max_usd =~ ^[0-9]{1,6}(\.[0-9]{1,6})?$ ]] || die '-U takes a USD amount'
 if [[ $sub == loop ]]; then
