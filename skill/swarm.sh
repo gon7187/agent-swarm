@@ -169,10 +169,10 @@ preamble() {
   fi
   printf '  post:  %q post %q %q "message" [target_agent_id]\n' "$SELF" "$1" "$2"
   echo 'Do not inspect anon.map or infer model identities. Never start another swarm or spawn sub-agents.'
-  echo 'Writable workers must test and commit their own changes explicitly; no blanket staging. Your final message is your deliverable.'
+  echo 'Writable workers must test and commit their own changes explicitly; no blanket staging. If the sandbox blocks git writes, do not work around it with plumbing: leave the changes, the orchestrator commits them on your branch. Your final message is your deliverable.'
 }
 run_one() {
-  local id=$1 model=$2 mode=$3 wd=$4 prompt=$5 md=$6 engine=${7:-} rc=0 base='' common extra
+  local id=$1 model=$2 mode=$3 wd=$4 prompt=$5 md=$6 engine=${7:-} rc=0 base='' common extra owned=0
   local log=${md%.md}.log
   local -a cmd
   export SWARM_AGENT_DIR="$dir/a/$id"
@@ -186,7 +186,7 @@ $prompt"
     base=$(git -C "$wd" rev-parse HEAD 2>/dev/null) || base=''
     if [[ -f $dir/worktrees.jsonl ]]; then
       common=$(jq -r --arg path "$wd" 'select(.path == $path) | .base' "$dir/worktrees.jsonl")
-      [[ -z $common ]] || base=$common
+      [[ -z $common ]] || { base=$common; owned=1; }
     fi
   fi
   if [[ $engine == claude ]] || { [[ -z $engine ]] && is_claude "$model"; }; then
@@ -230,6 +230,16 @@ $prompt"
   fi
   [[ $rc != 0 || ( -s $md && $(LC_ALL=C tr -d '[:space:]' < "$md") != '' ) ]] || rc=65
   if [[ $mode == rw && -n $base ]]; then
+    # Codex keeps .git read-only inside its sandbox, so agents may leave edits
+    # uncommitted (or commit via plumbing with a stale index). In a swarm-owned
+    # worktree, resync the index and commit the leftovers on the agent's branch.
+    if ((owned)) && [[ -n $(git -C "$wd" status --porcelain) ]]; then
+      git -C "$wd" reset -q
+      if [[ -n $(git -C "$wd" status --porcelain) ]]; then
+        git -C "$wd" add -A && git -C "$wd" commit -qm "swarm: $id leftovers (auto-commit by orchestrator)" ||
+          echo "swarm: auto-commit failed in $wd" >&2
+      fi
+    fi
     git -C "$wd" diff "$base" > "${md%.md}.diff" || rc=70
     printf '%s\n' "$(jq -cn --arg id "$id" --arg branch "$(git -C "$wd" symbolic-ref --short HEAD || true)" \
       --arg base "$base" --arg head "$(git -C "$wd" rev-parse HEAD)" --arg dirty "$(git -C "$wd" status --porcelain)" \
