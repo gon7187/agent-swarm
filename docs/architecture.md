@@ -1,131 +1,103 @@
 # Architecture
 
-`swarm.sh` is a single bash script. It does not host models, keep state in a server or talk to APIs directly: it launches the coding-agent CLIs you already use (`claude -p`, `codex exec`) as child processes, gives each one a prompt and a working directory, and collects their output into files.
+`swarm.sh` is a single bash script. It does not host models, keep state in a server or talk to APIs directly: it launches the coding-agent CLIs you already use (`claude -p`, `codex exec`) as child processes, gives each one a prompt and a working directory, and collects their output into files. The round, board and judge protocol is described in [protocol.md](protocol.md); this page covers engines, sandboxing and the file layout.
 
 ## Engines
 
-The engine is chosen from the model name:
-
-| Model name | Engine | Command (simplified) |
+| Model | Engine | Command (simplified) |
 |---|---|---|
-| `claude-*` | Claude Code | `claude -p "<prompt>" --model <model> ...` |
-| anything else | Codex | `codex exec --skip-git-repo-check -m <model> -o <out.md> -s workspace-write ... "<prompt>"` |
+| `claude-*`, or listed in `$SWARM_CLAUDE_MODELS` | Claude Code | `claude -p "<prompt>" --model <model> --output-format json ...` |
+| anything else | Codex | `codex exec --json --skip-git-repo-check -m <model> -o <out.md> -s workspace-write ... "<prompt>"` |
 
-Binaries can be replaced with `SWARM_CLAUDE_BIN` / `SWARM_CODEX_BIN`, which is how `tests/test.sh` runs the whole flow offline against stubs.
+In `tasks.jsonl` an explicit `"engine": "claude" | "codex"` overrides the name-based choice. Binaries can be replaced with `SWARM_CLAUDE_BIN` / `SWARM_CODEX_BIN`, which is how `tests/test.sh` runs the whole flow offline against stubs.
 
 The roster (`swarm.sh roster`) is the union of:
 
 - Claude models from `$SWARM_CLAUDE_MODELS` (default `claude-fable-5-1 claude-opus-5-5 claude-sonnet-5 claude-haiku-4-5`), if `claude` is on `PATH`;
 - Codex models from `$SWARM_CODEX_MODELS`, or from `codex debug models` filtered to `visibility == "list"`, if `codex` is on `PATH`.
 
-## The `all` flow
+Without `-m`, `all` uses the first model of each harness; `-m all` uses the whole roster.
 
-```mermaid
-sequenceDiagram
-    participant U as swarm.sh
-    participant A as agents (parallel)
-    participant B as board.jsonl
-    participant J as judge
-    U->>A: round 1: TASK
-    A->>B: post findings / questions
-    B->>A: read
-    A-->>U: r1/<model>.md
-    U->>A: round 2: TASK + "read r1/*.md, critique, improve"
-    A->>B: post objections
-    A-->>U: r2/<model>.md
-    U->>J: TASK + r<last>/*.md + board
-    J-->>U: final.md
-```
+### Usage accounting
 
-1. `task.md` is written to the run directory.
-2. **Round 1.** For every model in the roster (or `-m`), one agent is started with the task. At most `-j` agents run at the same time; each is killed after `-t` seconds.
-3. **Round r > 1.** Every agent gets the same task plus an instruction: the previous round's answers are in `r<r-1>/*.md`; read them, critique them, post errors to the board, adopt what is right and give an improved answer. Agents in a round run in parallel; rounds are sequential.
-4. **Judge.** The `-S` model (default: first roster model) runs read-only with the task, the last round's answers and the board. It is told to resolve disagreements on the merits rather than by majority, and to note where agents disagreed and why. Its answer is `final.md`.
+- Claude: the JSON result goes to `<id>.md` (`.result`) and `<id>.usage` (`{cost: .total_cost_usd, usage}`); `is_error == true` counts as a failure.
+- Codex: the `--json` event stream goes to `<id>.log`; usage is summed from `turn.completed` events.
+- `swarm.sh status` prints a COST column and a total. Missing data is shown as `unknown`, never as 0.
 
-Every agent's prompt is prefixed with a preamble:
+## Preamble
+
+Every agent's prompt starts with a preamble that gives it its id, the project path and the board commands:
 
 ```text
 You are agent "<id>" in a swarm of AI agents working in parallel. Project dir: <project>
-Shared message board (use it to coordinate, share findings, challenge others, avoid duplicate work):
+Your cwd is scratch space; the project is <project> (use absolute paths or git -C).
+Shared message board:
   read:  <swarm.sh> read <run> <id>
   post:  <swarm.sh> post <run> <id> "message" [target_agent_id]
-Read the board before starting and before finishing; post key findings and disagreements briefly.
+Run board commands standalone (no cd, no &&).
 You are a worker: never start another swarm or spawn sub-agents. Your final message is your deliverable.
 ```
 
-In `all` the agent id is the model name; in `run` it is the task `id`; the judge is `synth`.
-
-## The `run` flow
-
-`tasks.jsonl` holds one task per line:
-
-| Field | Required | Default | Meaning |
-|---|---|---|---|
-| `id` | yes | | Agent id, output file name, branch suffix |
-| `prompt` | yes | | The task |
-| `model` | no | first roster model | Model (and therefore engine) |
-| `mode` | no | `ro` | `ro` or `rw` |
-| `worktree` | no | `false` | Create a git worktree for this agent |
-| `dir` | no | project dir | Working directory (ignored if `worktree` is true) |
-
-Lines without `id` and `prompt` are skipped. All tasks start in parallel (up to `-j`), share one board, and write `<run>/<id>.md`. There are no rounds and no judge: coordination happens on the board.
-
-## Board format
-
-`<run>/board.jsonl`, append-only, one JSON object per line:
-
-```json
-{"ts":"14:31:07","from":"claude-opus-5-5","to":"all","msg":"..."}
-```
-
-| Field | Meaning |
-|---|---|
-| `ts` | Local time `HH:MM:SS` |
-| `from` | Sender id |
-| `to` | Recipient id, or `all` for a broadcast |
-| `msg` | Text |
-
-- `post` builds the object with `jq -n` (so any text is safely escaped) and appends it under `flock <run>/board.lock`: concurrent writers never interleave.
-- `read DIR ME` shows broadcasts, messages to `ME` and messages from `ME`; `read DIR` shows everything.
-- The board is a plain file: you can `tail -f` it, grep it, or post into a running swarm yourself.
+In `all` the id is the anonymous `aK`; in `run` it is the task `id`. Round 1 of `all` asks agents to post only; see [protocol.md](protocol.md).
 
 ## Sandboxing per engine
 
 | | Claude Code | Codex |
 |---|---|---|
-| **ro** (default) | `--permission-mode dontAsk` with `--allowedTools Read Grep Glob WebSearch WebFetch "Bash(<swarm.sh> read:*)" "Bash(<swarm.sh> post:*)"`. Anything not on the list is denied without a prompt. Working dir: the project. | `-s workspace-write -C <run>`: the sandbox's writable root is the run dir, so the agent can write the board and its output; the project is read-only to it. |
-| **rw** (`-w` or `"mode":"rw"`) | `--dangerously-skip-permissions`, working dir = the agent's worktree (or `dir`). | `-s workspace-write -C <worktree> --add-dir <run>`: writable worktree plus the run dir for the board. |
+| **ro** (default) | `--permission-mode dontAsk --add-dir <run>` with `--allowedTools Read Grep Glob WebSearch WebFetch "Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git status:*)" "Bash(git blame:*)"` + the board's `read`/`post`. Anything else is denied without a prompt. | `-s workspace-write -C <run>/a/<id>`: the project is readable, only the agent's own directory (its outbox) is writable. |
+| **rw** | `--permission-mode acceptEdits --add-dir <run>` with `--allowedTools Read Grep Glob Edit Write "Bash(git status:*)" "Bash(git diff:*)" "Bash(git add:*)" "Bash(git commit:*)"` + the board + `$SWARM_RW_ALLOW`. Working dir: the agent's worktree. | `-s workspace-write -C <worktree> --add-dir <run>/a/<id>`. |
+| **rw + `SWARM_UNSAFE_RW=1`** | `--dangerously-skip-permissions`. Full host access; a warning is printed. | unchanged |
 | **judge** | Always ro. | Always ro. |
 
-All agents run with stdin closed (`</dev/null`) and under `timeout`.
+`rg` is intentionally not on the ro allowlist: `rg --pre=CMD` executes arbitrary commands.
+
+Unless `SWARM_INHERIT_CONFIG=1`, workers start without the user's own configuration: Claude without user settings, hooks and MCP servers, Codex with `--ignore-user-config`. Authentication is not affected.
+
+All agents run with stdin closed (`</dev/null`) and under `timeout -k 30 <-t>`. A `trap` on INT/TERM walks the process tree of every background job (`pgrep -P`) and kills it: GNU `timeout` puts its child into its own process group, so killing the group of `swarm.sh` alone would not reach the model CLIs.
+
+### Mode and worktree
+
+`mode` controls permissions; `worktree` controls where the agent works. They are independent, and contradictions are rejected:
+
+| `mode` | `worktree` | Result |
+|---|---|---|
+| unset | `true` | `rw` in its own worktree |
+| unset | unset / `false` | `ro` in the project |
+| `rw` | `true` | `rw` in its own worktree |
+| `rw` | `false` | rejected unless `"shared": true` (several writers in one checkout) |
+| `ro` | `true` | rejected |
+
+In `all`, `-w` means `rw` + one worktree per agent.
 
 ### Worktrees
 
-With `-w` (all) or `"worktree":true` (run), each agent gets:
+Each worktree agent gets:
 
 - path `<repo>/.swarm/wt/<run>-<id>`,
-- branch `swarm/<run>/<id>`, created from the current `HEAD`.
+- branch `swarm/<run>/<id>`, created from the current `HEAD` (uncommitted changes are not included; `-w` warns when the tree is dirty).
 
-Worktrees need a git repository. They are never merged automatically; inspect and merge the branches yourself, then `swarm.sh clean <run>` removes the worktrees and the `swarm/<run>/*` branches. `clean` is conservative: it refuses to delete a worktree with uncommitted changes or a branch that is not merged, so agent work is never lost by accident.
+rw agents commit their own work. After each rw agent, `swarm.sh` appends `{id, branch, base, head, dirty}` to `manifest.jsonl` and writes `git diff <base>` to `r<N>/<id>.diff`. Nothing is merged automatically; the judge names a `WINNER` and the script prints the merge command. `swarm.sh clean <run>` removes the worktrees and the `swarm/<run>/*` branches, but refuses to delete a worktree with uncommitted changes or a branch that is not merged.
 
 ### Nesting guard
 
-`swarm.sh` exports `SWARM_DEPTH=1` before launching agents and refuses to start a swarm when `SWARM_DEPTH >= 1`. A worker that tries to start its own swarm gets an error telling it to do the task itself. The board subcommands (`read`, `post`) and `roster` still work inside workers.
+`swarm.sh` exports `SWARM_DEPTH=1` before launching agents and refuses to start a swarm when `SWARM_DEPTH >= 1`. The board subcommands (`read`, `post`) and `roster` still work inside workers.
 
 ## File layout of a run
 
 ```text
 <run>/                         # -o, default .swarm/<YYYYmmdd-HHMMSS>
-├── task.md                    # all: the task text
-├── board.jsonl                # messages
-├── board.lock                 # flock target
+├── task.md                    # the task text
+├── anon.map                   # all: aK <TAB> model
+├── a/<id>/outbox.jsonl        # the agent's board messages (its only writable place in ro)
 ├── r1/                        # all: one dir per round
-│   ├── <model>.md             # the agent's final message
-│   ├── <model>.log            # stderr / engine log
-│   └── <model>.rc             # exit code (124 = timeout)
+│   ├── <id>.md                # the agent's answer (written by swarm.sh)
+│   ├── <id>.log               # engine log / event stream
+│   ├── <id>.rc                # exit code (124 = timeout, 65 = empty answer)
+│   ├── <id>.usage             # cost and tokens, when the engine reports them
+│   └── <id>.diff              # rw: git diff against the base commit
 ├── r2/ ...
+├── manifest.jsonl             # rw: {id, branch, base, head, dirty} per agent
+├── worktrees.jsonl            # worktrees to remove with clean
 ├── final.md                   # all: judge output (+ final.log, final.rc)
 └── <id>.md / .log / .rc       # run: one set per task
 ```
-
-When a phase finishes, `swarm.sh` prints a summary table (agent, exit code, output path) and the board message count. `swarm.sh status <run>` shows the same for a run in progress.

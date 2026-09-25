@@ -9,14 +9,14 @@ General rule for prompts: make them self-contained. State the goal, the constrai
 Several models propose and attack a design; the judge merges the strongest parts.
 
 ```bash
-swarm all -r 2 -S claude-opus-5-5 "
+swarm all -m all -r 2 "
 We need to add multi-tenant support to this service (see src/ and docs/adr/).
 Constraints: single Postgres cluster, no downtime migration, < 5 ms p50 overhead.
 Propose a design: data isolation model, migration plan, risks.
 Output: a short design doc with a decision table and open questions."
 ```
 
-Why it works: round 1 gives you genuinely independent designs; round 2 forces each model to confront the others' objections on the board. Read the "where agents disagreed" section of `final.md` first; that is where the real decision is.
+Why it works: round 1 gives you genuinely independent designs (agents do not read the board yet); round 2 forces each model to refute or accept the others' claims with evidence. `-m all` is worth it here: 11 models means 23 sessions, but a design decision is expensive to get wrong. Read the `UNRESOLVED` part and the "where agents disagreed" section of `final.md` first; that is where the real decision is.
 
 ## 2. Hard-bug hunt
 
@@ -33,7 +33,7 @@ Output: root cause with file:line evidence, a minimal fix, and how to prove it."
 Tips:
 
 - Paste the exact error text and the failing command; do not paraphrase.
-- Agents post hypotheses to the board early, so others can refute them instead of repeating the same investigation.
+- Agents post hypotheses to the board early; from round 2 others must refute them with evidence instead of repeating the same investigation.
 - Default read-only mode is right here: you want diagnosis, not five competing patches.
 
 ## 3. Parallel feature in worktrees
@@ -43,13 +43,13 @@ Split a feature by file ownership, give each part to a model, and let them coord
 `tasks.jsonl`:
 
 ```jsonl
-{"id":"schema","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an 'invoices' table + migration in db/. Own only db/. Post the final column list to the board as soon as it is stable."}
-{"id":"api","model":"gpt-5.5","mode":"rw","worktree":true,"prompt":"Add CRUD endpoints for invoices in src/api/invoices/. Own only src/api/invoices/. Take the schema from the board (agent 'schema'); ask there if unclear. Include tests."}
-{"id":"ui","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an invoices list page in web/src/pages/invoices/. Own only that dir. Take the API shape from the board (agent 'api')."}
+{"id":"schema","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an 'invoices' table + migration in db/. Own only db/. Post the final column list to the board as soon as it is stable. Commit your work."}
+{"id":"api","model":"gpt-5.5","mode":"rw","worktree":true,"prompt":"Add CRUD endpoints for invoices in src/api/invoices/. Own only src/api/invoices/. Take the schema from the board (agent 'schema'); ask there if unclear. Include tests. Commit your work."}
+{"id":"ui","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an invoices list page in web/src/pages/invoices/. Own only that dir. Take the API shape from the board (agent 'api'). Commit your work."}
 ```
 
 ```bash
-swarm run -j 3 tasks.jsonl
+SWARM_RW_ALLOW='Bash(npm test:*)' swarm run -j 3 tasks.jsonl
 git log --oneline swarm/<run>/schema swarm/<run>/api swarm/<run>/ui
 git merge swarm/<run>/schema swarm/<run>/api swarm/<run>/ui
 swarm clean .swarm/<run>
@@ -59,7 +59,8 @@ Rules that keep this sane:
 
 - Every task names the directories it owns; nobody edits outside them.
 - Shared contracts (schema, API shape) are published on the board, with an explicit producer.
-- You merge. Review each branch like a PR.
+- rw agents can edit and commit, nothing else; allow project commands such as a test runner with `SWARM_RW_ALLOW`.
+- You merge. Review each branch like a PR (`manifest.jsonl` lists base and head per agent).
 
 ## 4. Research
 
@@ -91,6 +92,11 @@ The critique round is what makes this useful: false positives from one model ten
 
 ## Keeping cost down
 
+A run is `N × R + 1` sessions, and the number is printed before start.
+
+- The default roster (one model per harness) is enough for most questions; `-m all` is for decisions worth real money.
 - `-m` with two or three models covers most second-opinion needs.
 - `-r 1` for independent opinions only; `-r 2` when you want debate; more rounds rarely help.
 - A cheaper judge (`-S claude-sonnet-5`) is fine when answers are likely to converge.
+- If only the judge failed, `swarm judge .swarm/<run>` reruns it without redoing the rounds.
+- `-q N` lets a run finish with N valid answers instead of stopping on the first failed agent.
