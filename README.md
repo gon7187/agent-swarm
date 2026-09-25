@@ -375,6 +375,8 @@ The second iteration repeated the exercise on v0.3.0: another 11-model review, w
 
 A third iteration designed `loop` and `mass` themselves, before either was implemented: eleven models reviewed the shared model-spec and orchestration design, and partway through, Codex hit its usage limit — the CLI's own message is *"You've hit your usage limit..."*. `-q 4` let the review finish instead of failing outright, and reading the surviving answers surfaced a live v0.4.0 bug: the validator only recognized the literal prompt text `FINAL ANSWER (complete, standalone)`, so a real answer written as a Markdown heading (`## FINAL ANSWER`) counted as failed and dragged the round toward the quorum floor. The fix — a `has_final` check anchored at the start of a line, which also rejects a stray inline mention of the phrase — shipped immediately, and rather than pay for the rounds again, the judge alone was rerun once with `swarm judge DIR`.
 
+Before release, v0.5.0 was checked on live models (Claude only; Codex was still out of quota). A `loop` with `claude-sonnet-5@medium` and `claude-sonnet-5@xhigh` executors and a `claude-opus-5-5` judge polished a 60-word pitch over six iterations, scores 45 → 70 → 74 → 74 (stall, incumbent kept) → 78 → 83, until the operator brake `-B 20` stopped it with exit 4 (`ideal: false`), for about $2.70. A `mass` run with 14 agents (`claude-haiku-4-5@low*10 claude-sonnet-5@low*4`) went through two sub-judges and a final judge for about $1. The live runs caught three bugs the stub tests had missed: every `loop` treated iteration 1 as stagnant, executors' `CHANGES` sections leaked into `best.md`, and two workers answered only "Posted.".
+
 ## Comparison
 
 Honest one-liners; all of these are good tools with different goals.
