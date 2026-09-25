@@ -455,6 +455,14 @@ worktree() {
 }
 # A final-answer heading at line start, any Markdown decoration: "## FINAL ANSWER", "**FINAL ANSWER:**".
 has_final() { grep -Eq '^[[:space:]]*(#{1,6}[[:space:]]*)?(\*\*|__)?[[:space:]]*FINAL ANSWER\b' "$1"; }
+# The answer itself: text after the last FINAL ANSWER heading (whole file if there is none).
+answer_body() {
+  awk '{ l[NR] = $0 } /^[[:space:]]*#*[[:space:]]*(\*\*|__)?[[:space:]]*FINAL ANSWER/ { h = NR }
+    END { if (!h) { for (i = 1; i <= NR; i++) print l[i]; exit }
+          t = l[h]; sub(/^[^F]*FINAL ANSWER[^:]*:?[[:space:]]*/, "", t); gsub(/^(\*\*|__)+|(\*\*|__)+$/, "", t)
+          if (t != "") print t
+          for (i = h + 1; i <= NR; i++) print l[i] }' "$1"
+}
 throttle() { while (($(jobs -rp | wc -l) >= jobs_max)); do wait -n || true; done; }
 # Run ids into answer dir $1 with prompt $p. Transient limits (rc 76) are requeued by the
 # orchestrator up to 3 times; engines cooling down are deferred while others keep launching;
@@ -873,7 +881,7 @@ commit_iteration() {
   if [[ $best == MERGED ]]; then merged_text "$d/judge.md" > "$d/merged.md"; fi
   if [[ $best != INCUMBENT ]]; then
     rm -f "$dir/best.md.tmp"
-    if [[ $best == MERGED ]]; then cp "$d/merged.md" "$dir/best.md.tmp"; else cp "$d/$best.md" "$dir/best.md.tmp"; fi
+    if [[ $best == MERGED ]]; then cp "$d/merged.md" "$dir/best.md.tmp"; else answer_body "$d/$best.md" > "$dir/best.md.tmp"; fi
     chmod a-w "$dir/best.md.tmp"; mv -f "$dir/best.md.tmp" "$dir/best.md"
   fi
   bsha=$(sha "$dir/best.md")
@@ -962,7 +970,7 @@ loop_reopen() {
     b=$(jq -sr '[.[] | select(.best != "INCUMBENT")] | last | if . == null then "" elif .best == "MERGED" then "it\(.it)/merged.md" else "it\(.it)/\(.best).md" end' "$dir/loop.jsonl")
   fi
   rm -f "$dir/best.md.tmp"
-  if [[ -n ${b:-} ]]; then cp "$dir/$b" "$dir/best.md.tmp"; chmod a-w "$dir/best.md.tmp"; mv -f "$dir/best.md.tmp" "$dir/best.md"; else rm -f "$dir/best.md"; fi
+  if [[ -n ${b:-} ]]; then if [[ $b == */merged.md ]]; then cp "$dir/$b" "$dir/best.md.tmp"; else answer_body "$dir/$b" > "$dir/best.md.tmp"; fi; chmod a-w "$dir/best.md.tmp"; mv -f "$dir/best.md.tmp" "$dir/best.md"; else rm -f "$dir/best.md"; fi
 }
 loop_branch() { echo "swarm/$(basename "$dir")/i$1/$2"; }
 # rw loop: iteration k branches every executor from the current best head (HEAD at k=1).

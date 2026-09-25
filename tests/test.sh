@@ -461,7 +461,8 @@ script 'CONTINUE 70 a1 0' 'STOP 90 INCUMBENT 90'
 loop -o "$T/loop" hello > "$T/loop.out" 2> "$T/loop.err"
 [[ $(wc -l < "$T/loop/loop.jsonl") == 2 && $(jq .ideal "$T/loop/result.json") == true && $(jq -r .kind "$T/loop/run.json") == loop ]] || fail loop-basic
 [[ $(jq -c .score_history "$T/loop/result.json") == '[70,90]' && $(jq -r .best "$T/loop/result.json") == it1/a1 ]] || fail loop-result
-cmp -s "$T/loop/it1/a1.md" "$T/loop/final.md" || fail loop-final
+# best.md/final.md hold only the answer body, not the CHANGES section or the FINAL ANSWER heading.
+[[ $(cat "$T/loop/final.md") == 'harness answer from a1' ]] || fail "loop-final: $(head -c 80 "$T/loop/final.md")"
 has "$T/loop.err" 'it1: CONTINUE 70 (+70) best=a1'
 has "$T/loop/it2/a1.prompt" "$T/loop/best.md"
 has "$T/loop/it2/a1.prompt" 'direction 1'
