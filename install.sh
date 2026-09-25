@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — install the swarm skill.
-#
-#   curl -fsSL https://raw.githubusercontent.com/gon7187/agent-swarm/main/install.sh | bash
-#   or: git clone https://github.com/gon7187/agent-swarm && ./install.sh
-#
-#   --default        make swarm the default for multi-part tasks (edits ~/.claude/CLAUDE.md
-#                     and ~/.codex/AGENTS.md, idempotent marked block, backs up on first edit)
-#   --uninstall       remove the installed skill, symlinks, and marked blocks
-#   --prefix DIR      install location (default: ~/.agents/skills/swarm)
-#   --no-link         skip the ~/.local/bin/swarm convenience symlink
-#   -h, --help        show this help
+# install.sh — install the swarm skill. Run with -h/--help for usage.
 set -euo pipefail
 
 REPO_URL="https://github.com/gon7187/agent-swarm.git"
@@ -29,7 +19,21 @@ info()  { printf '%s\n' "${BOLD}==>${RESET} $*"; }
 warn()  { printf '%s\n' "${YELLOW}warning:${RESET} $*" >&2; }
 die()   { printf '%s\n' "${RED}error:${RESET} $*" >&2; exit 1; }
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+  cat <<'EOF'
+install.sh — install the swarm skill.
+
+  curl -fsSL https://raw.githubusercontent.com/gon7187/agent-swarm/main/install.sh | bash
+  or: git clone https://github.com/gon7187/agent-swarm && ./install.sh
+
+  --default        make swarm the default for multi-part tasks (edits ~/.claude/CLAUDE.md
+                    and ~/.codex/AGENTS.md, idempotent marked block, backs up on first edit)
+  --uninstall       remove the installed skill, symlinks, and marked blocks
+  --prefix DIR      install location (default: ~/.agents/skills/swarm)
+  --no-link         skip the ~/.local/bin/swarm convenience symlink
+  -h, --help        show this help
+EOF
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -118,18 +122,31 @@ strip_block() {
   mv "$tmp" "$file"
 }
 
+# Removes $1 only if it's a symlink whose fully-resolved target is $PREFIX
+# itself or a path inside it, so an unrelated symlink at the same
+# conventional path is left alone.
+remove_symlink_into_prefix() {
+  local link="$1" resolved
+  [ -L "$link" ] || return 0
+  resolved="$(readlink -f -- "$link" 2>/dev/null || true)"
+  case "$resolved" in
+    "$PREFIX"|"$PREFIX"/*) rm -f "$link" ;;
+  esac
+  return 0
+}
+
 if [ "$DO_UNINSTALL" -eq 1 ]; then
   if looks_like_swarm_install "$PREFIX"; then
+    remove_symlink_into_prefix "${HOME}/.claude/skills/swarm"
+    remove_symlink_into_prefix "${HOME}/.local/bin/swarm"
     info "removing $PREFIX"
     rm -rf "$PREFIX"
+    strip_block "${HOME}/.claude/CLAUDE.md"
+    strip_block "${HOME}/.codex/AGENTS.md"
+    info "uninstalled"
   else
     warn "not removing $PREFIX: it doesn't look like a swarm install (expected SKILL.md and swarm.sh); leaving it in place"
   fi
-  [ -L "${HOME}/.claude/skills/swarm" ] && rm -f "${HOME}/.claude/skills/swarm"
-  [ -L "${HOME}/.local/bin/swarm" ] && rm -f "${HOME}/.local/bin/swarm"
-  strip_block "${HOME}/.claude/CLAUDE.md"
-  strip_block "${HOME}/.codex/AGENTS.md"
-  info "uninstalled"
   exit 0
 fi
 
@@ -171,15 +188,26 @@ if [ -z "$REPO_ROOT" ]; then
   REPO_ROOT="$CLEANUP_DIR"
 fi
 
-# --- install: stage into a temp sibling, then move into place atomically ---
+# --- install: stage into a temp sibling, then swap it in atomically ---
+# (move the old prefix aside, move the staged copy in, then discard the old
+# one; if the swap-in fails, the old prefix is moved back so nothing is lost)
 info "installing to $PREFIX"
 mkdir -p "$(dirname "$PREFIX")"
 TMP_PREFIX_DIR="$(mktemp -d "$(dirname "$PREFIX")/.swarm-install.XXXXXX")"
 cp -r "$REPO_ROOT/skill/." "$TMP_PREFIX_DIR/"
 chmod +x "$TMP_PREFIX_DIR/swarm.sh"
-rm -rf "$PREFIX"
-mv "$TMP_PREFIX_DIR" "$PREFIX"
-TMP_PREFIX_DIR=""
+OLD_PREFIX_DIR=""
+if [ -e "$PREFIX" ]; then
+  OLD_PREFIX_DIR="$PREFIX.old.$$"
+  mv "$PREFIX" "$OLD_PREFIX_DIR"
+fi
+if mv "$TMP_PREFIX_DIR" "$PREFIX"; then
+  TMP_PREFIX_DIR=""
+  [ -z "$OLD_PREFIX_DIR" ] || rm -rf "$OLD_PREFIX_DIR"
+else
+  [ -z "$OLD_PREFIX_DIR" ] || mv "$OLD_PREFIX_DIR" "$PREFIX"
+  die "failed to move staged install into place"
+fi
 
 if [ -d "${HOME}/.claude" ]; then
   mkdir -p "${HOME}/.claude/skills"
@@ -201,4 +229,9 @@ if [ "$DO_DEFAULT" -eq 1 ]; then
 fi
 
 printf '%s\n' "${GREEN}==> done${RESET}"
-"$PREFIX/swarm.sh" roster || warn "roster check failed (no active harness on PATH?)"
+ROSTER_OUT="$("$PREFIX/swarm.sh" roster)" || true
+if [ -z "$ROSTER_OUT" ]; then
+  warn "roster check failed (no active harness on PATH?)"
+else
+  printf '%s\n' "$ROSTER_OUT"
+fi

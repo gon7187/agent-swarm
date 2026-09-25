@@ -20,3 +20,6 @@ jobs:
 
       - name: tests
         run: bash tests/test.sh
+
+      - name: install tests
+        run: bash tests/install_test.sh
