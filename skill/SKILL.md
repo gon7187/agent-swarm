@@ -31,7 +31,7 @@ S=~/.agents/skills/swarm/swarm.sh
 "$S" resume .swarm/RUN
 "$S" judge .swarm/RUN -S gpt-6-astra    # retry only the judge
 "$S" status .swarm/RUN
-"$S" watch .swarm/RUN
+"$S" watch .swarm/RUN               # messenger-style chat; --plain for the status table
 "$S" read .swarm/RUN api
 "$S" post .swarm/RUN api "Ready for review" tests
 "$S" clean .swarm/RUN
@@ -161,6 +161,10 @@ tool pattern per line**:
 export SWARM_RW_ALLOW=$'Bash(uv run pytest:*)\nBash(shellcheck:*)'
 ```
 
+Without it, rw Claude workers can edit and commit but cannot run tests or
+linters, so they code blind; the script prints a note once per run. Always pass
+the project's test/lint commands when giving code work to a swarm.
+
 **`SWARM_UNSAFE_RW=1` bypasses all Claude permission checks and exposes the
 host to unrestricted actions. A worktree does not sandbox the host.**
 Claude permission allowlists are not OS isolation. Codex uses workspace-write
@@ -187,7 +191,9 @@ validated against the available roster. Explicit `engine` permits custom models.
 Claude aliases in its roster use Claude; other names use Codex unless `engine`
 is explicit. Codex discovers visible models via `codex debug models`.
 `SWARM_TERMINAL` names one executable (default `xdg-terminal-exec`, invoked with
-`-e`); missing display/launcher is nonfatal. `watch` prints once without a TTY.
+`-e`); missing display/launcher is nonfatal. `watch` renders the board as a chat
+(bubbles, replies quote the addressee, drop-out notices, typing line; needs gawk,
+otherwise or with `--plain` the status table) and prints once without a TTY.
 
 Outputs: `r<N>/a<ID>.md` and `final.md` for `all`; `<id>.md` for `run`.
 Each has `.rc`, `.log`, `.stderr`, `.usage`, `.prompt`; prompts use stdin.

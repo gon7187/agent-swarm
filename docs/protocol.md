@@ -172,4 +172,4 @@ sequenceDiagram
 - **Layout:** `r1/a1..a100.*`, `j/L<n>/g<m>.*` for tournament levels, `.backoff/`, `failures.jsonl`.
 - **`mass` inside `loop`.** A `loop` iteration with more executors than `G` runs its own tournament, and only the top judge writes the iteration's `decision.json`. `-X` further limits the mass-sized roster to iteration 1 — explore wide once, then refine with a smaller, cheaper set of executors in later iterations.
 
-Ring critique, tournament judging, board caps and `-X` are the most recently designed pieces of this protocol — **v0.5.0 if they land at merge time; otherwise they follow in a later release.**
+Ring critique, tournament judging, board caps and `-X` are part of v0.5.0 and covered by the stub tests in `tests/test.sh`.

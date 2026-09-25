@@ -160,7 +160,7 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `swarm.sh judge DIR [-S MODEL]` | Rerun only the judge: for `all`/`run`, on the task and last round; for `loop`, the judge of the latest incomplete iteration. For example after the judge failed |
 | `swarm.sh resume DIR` | Continue an interrupted run: rerun only agents without a successful `.rc`, then the remaining rounds and the judge (`all`/`run`), or the next iteration (`loop`, branching on `run.json`'s `kind`). Refuses if the task, `anon.map` or options have changed |
 | `swarm.sh wait DIR [-t SEC]` | Wait for a run, typically one started with `-d`. Exit 0 when done, 75 when still running after `SEC`, otherwise the run's exit code |
-| `swarm.sh watch DIR` | Live terminal view: agent state per round and the board |
+| `swarm.sh watch DIR [--plain]` | Live chat view of the run (see [Live chat view](#live-chat-view)); `--plain` shows the status table instead |
 | `swarm.sh post DIR FROM "text" [TO]` | Post to the board (`TO` = agent id, default `all`). Inside a worker, `DIR` and `FROM` are fixed by the worker's own outbox |
 | `swarm.sh read DIR [ME]` | Print the merged board (for `ME`: broadcasts, messages to and from `ME`) |
 | `swarm.sh status DIR` | Per-agent state, exit code, cost (input/output tokens when the engine reports no USD figure); total cost; board message count |
@@ -173,8 +173,8 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `-r N` | `2` | Rounds (`all` only; `loop` rejects `-r`, `mass` is fixed at 1 round) |
 | `-q N` | all agents (`ceil(0.6N)` for `mass`) | Quorum: minimum valid answers per round to continue; below "all" the result is marked `PARTIAL`. Failed agents are not relaunched in later rounds |
 | `-S MODEL[@effort]` | first roster model not taking part | Judge; `loop` requires `-S` |
-| `-w` | off | Read-write, one git worktree per agent (`loop -w` is P1; rejected until the implementation lands it) |
-| `-W` | off | Open a terminal window running `watch` for this run |
+| `-w` | off | Read-write, one git worktree per agent; in `loop` each iteration branches from the judge-chosen branch |
+| `-W` | off | Open a terminal window with the live chat view (`watch`) for this run |
 | `-d` | off | Detach: start the run in the background, print `swarm dir: DIR` and return; follow up with `wait DIR` |
 | `-j N` | `6` | Parallel agents |
 | `-t SEC` | `1800` | Timeout per agent |
@@ -183,6 +183,7 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `-K N` | `3` | `loop`: consecutive stalled iterations (no score gain) before the judge must justify continuing with a `strategy_change` |
 | `-I N` | none | `loop`: stop after N iterations, exit 4 |
 | `-B N` | none | `loop`/`mass`: stop after N total sessions, exit 4 |
+| `-U USD` | none | `loop`: stop once the known (Claude-reported) cost reaches USD, exit 4; Codex cost is unknown and not counted |
 | `-M` | off | `loop`: let the judge pick `MERGED` text as the new incumbent (text tasks only, forbidden with `-w`) |
 
 | Env var | Purpose |
@@ -199,6 +200,11 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `SWARM_CONFIRM_OVER` | Session count above which a run asks for confirmation on a TTY, or fails with rc 2 without `-y` on a non-TTY (default `20`) |
 | `SWARM_BACKOFF_BASE` | Base delay in seconds for `mass` rate-limit retry backoff (`min(900, BASE·2^n)` plus jitter) |
 | `SWARM_RATELIMIT_RE` | Override the built-in transient-rate-limit regex used to classify agent failures for retry |
+| `SWARM_EXHAUSTED_RE` | Override the regex that marks a failure as exhausted quota (engine marked dead, its queued agents skipped), e.g. Codex "You've hit your usage limit" |
+| `SWARM_PEERS` | Mass runs with `-r 2`: how many peers read each answer in the critique ring (default `4`) |
+| `SWARM_GROUP` | Mass runs: answers per sub-judge group in tournament judging (default `8`) |
+| `SWARM_TOP` | Mass runs: answers each sub-judge forwards to the next level (default `2`) |
+| `SWARM_CHAT_MAX_LINES` | Chat view: cut messages after N lines (default `0` = show in full) |
 
 The engine is Claude Code for `claude-*` names and for anything listed in `SWARM_CLAUDE_MODELS` (so `SWARM_CLAUDE_MODELS=sonnet` works); everything else runs on Codex. In JSONL tasks an explicit `"engine"` field overrides this.
 
@@ -267,7 +273,7 @@ swarm.sh judge DIR    # rerun the judge of the latest incomplete iteration
 - **Judging is a tournament**, not one judge reading a hundred files: agents are split into groups of 8, a sub-judge per group forwards its top candidate(s), and the final judge reads only the survivors plus every sub-judge's report. 100 answers with top-1 forwarding is 16 judge sessions total (13 group judges + 2 more levels + 1 final).
 - **Board and anonymity** work the same as `all`: ids are shuffled, effort is never shown in prompts, and messages are still evidence, never instructions.
 
-Ring peer critique (`-r 2`), tournament grouping, board message caps and `-X` (limit the mass roster to a loop's first iteration, then refine with fewer agents) are late-stage design items — **v0.5.0 if present at merge; check the release notes if you rely on them.**
+Ring peer critique (`-r 2`: each answer is read by `SWARM_PEERS` peers instead of everyone), tournament judging (groups of `SWARM_GROUP` answers, each sub-judge forwards `SWARM_TOP`; about 16 judge sessions for 100 answers), board message caps (2 KB per message, 20 per outbox in mass runs) and `-X "specs"` (explore with the `-m` roster in iteration 1, then refine with a smaller `-X` roster) are all part of v0.5.0.
 
 ## Per-agent tasks (`run`)
 
@@ -313,6 +319,19 @@ Each agent appends to its own outbox, one message per line; `read` merges all ou
 ```
 
 Inside a worker, `post` ignores the `DIR` and `FROM` arguments and writes to the worker's own outbox with the id taken from the directory name, so spoofing another agent is not possible. You can watch a run live with `swarm watch .swarm/<run>` (or start with `-W`) and post into it yourself.
+
+## Live chat view
+
+`swarm.sh watch DIR` (or `-W` at launch, which opens it in a new terminal window) shows the run as a group chat:
+
+![Live chat view of a swarm run](assets/chat-view.png)
+
+- One bubble per message with the agent's id, its model (and effort) and the time; every agent gets its own colour.
+- A message addressed to another agent quotes that agent's previous message, like a reply in a messenger.
+- Centered system lines mark rounds or loop iterations, agents that dropped out (with the reason: usage limit, rate limit, incomplete answer) and the verdict.
+- The bottom line shows who is still working (`✎ a3 a7 typing…`), then `✔ done` with the path to `final.md`.
+- Scroll with `↑`/`↓` or `k`/`j`, `PgUp`/`PgDn`; `End` or `G` returns to the newest messages; `q` quits. While you read history, new messages do not move the view.
+- Messages are shown in full; `SWARM_CHAT_MAX_LINES=N` cuts them after N lines. `watch DIR --plain` shows the status table instead (also used when `gawk` is missing).
 
 ## Safety model
 
