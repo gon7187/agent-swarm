@@ -54,6 +54,8 @@ if [[ ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-no-output ]]; then
 fi
 answer='FINAL ANSWER (complete, standalone): harness answer'
 [[ $prompt != *NOFINAL* ]] || answer='incomplete answer'
+[[ $prompt != *MDHEADING* ]] || answer=$'Analysis first.\n\n## **FINAL ANSWER**\nharness answer'
+[[ $prompt != *INLINEFINAL* ]] || answer='this merely mentions a FINAL ANSWER inline'
 if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
   run_dir=${SWARM_AGENT_DIR%/a/judge}
   if [[ -f $run_dir/worktrees.jsonl ]]; then
@@ -295,6 +297,9 @@ has <("$S" status "$T/run space") 'TOKENS(in/out)=30/5'
 has "$T/partial/a/judge/prompt" "$T/partial/r1/$failed_id.md"
 has "$T/partial/failures.jsonl" '65'
 reject "$S" all -r 2 -m sonnet -S claude-other -o "$T/no-final" NOFINAL
+# Models write the closing section as an ordinary Markdown heading, not the literal prompt text.
+"$S" all -r 2 -m sonnet -S claude-other -o "$T/md-final" MDHEADING > /dev/null || fail "markdown FINAL ANSWER heading rejected"
+reject "$S" all -r 2 -m sonnet -S claude-other -o "$T/inline-final" INLINEFINAL
 [[ $(cat "$T/no-final/r2/a1.rc") == 65 ]] || fail missing-final-section
 # Discovery is nonfatal and explicit participant + judge bypass it.
 touch "$T/discovery-fail"

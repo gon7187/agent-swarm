@@ -303,13 +303,15 @@ worktree() {
     '{repo:$repo,path:$path,branch:$branch,base:$base}' >> "$dir/worktrees.jsonl"
   printf '%s\n' "$wt"
 }
+# A final-answer heading at line start, any Markdown decoration: "## FINAL ANSWER", "**FINAL ANSWER:**".
+has_final() { grep -Eq '^[[:space:]]*(#{1,6}[[:space:]]*)?(\*\*|__)?[[:space:]]*FINAL ANSWER\b' "$1"; }
 throttle() { while (($(jobs -rp | wc -l) >= jobs_max)); do wait -n || true; done; }
 collect_results() {
   local f
   ok=() bad=()
   for f in "$@"; do
     if [[ ${r:-1} -gt 1 && -f ${f%.md}.rc && $(cat "${f%.md}.rc") == 0 ]] &&
-        ! grep -Fq 'FINAL ANSWER (complete, standalone)' "$f"; then
+        ! has_final "$f"; then
       echo 65 > "${f%.md}.rc"
     fi
     jq -cn --arg file "$f" --arg round "${r:-1}" --arg rc "$(cat "${f%.md}.rc" 2>/dev/null || echo missing)" '{round:$round,file:$file,rc:$rc}' >> "$dir/failures.jsonl"
@@ -422,7 +424,7 @@ Critique claims using evidence. Required sections: REFUTED (claim → evidence),
   for id in "${ids[@]}"; do
     files+=("$dir/r$r/$id.md")
     if [[ ${resuming:-0} == 1 && -s $dir/r$r/$id.md && -f $dir/r$r/$id.rc && $(cat "$dir/r$r/$id.rc") == 0 ]]; then
-      if ((r == 1)) || grep -Fq 'FINAL ANSWER (complete, standalone)' "$dir/r$r/$id.md"; then continue; fi
+      if ((r == 1)) || has_final "$dir/r$r/$id.md"; then continue; fi
     fi
     throttle
     run_one "$id" "${agent_models[$id]}" "$mode" "${wds[$id]}" "$p" "$dir/r$r/$id.md" &
