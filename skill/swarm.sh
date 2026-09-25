@@ -1025,7 +1025,7 @@ load_run() {
 sub=${1:---help}; shift || true
 case $sub in
   help|-h|--help) help_text; exit 0 ;;
-  version) echo 0.5.0; exit 0 ;;
+  version) echo 0.5.1; exit 0 ;;
   stop) (($# == 1)) || die 'stop DIR'
     [[ $(jq -r .kind "$1/run.json" 2>/dev/null) == loop ]] || die "not a loop run: $1"
     touch "$1/STOP"; echo 'swarm: loop stops after the current iteration' >&2; exit 0 ;;

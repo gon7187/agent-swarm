@@ -388,6 +388,8 @@ A third iteration designed `loop` and `mass` themselves, before either was imple
 
 Before release, v0.5.0 was checked on live models (Claude only; Codex was still out of quota). A `loop` with `claude-sonnet-5@medium` and `claude-sonnet-5@xhigh` executors and a `claude-opus-5-5` judge polished a 60-word pitch over six iterations, scores 45 → 70 → 74 → 74 (stall, incumbent kept) → 78 → 83, until the operator brake `-B 20` stopped it with exit 4 (`ideal: false`), for about $2.70. A `mass` run with 14 agents (`claude-haiku-4-5@low*10 claude-sonnet-5@low*4`) went through two sub-judges and a final judge for about $1. The live runs caught three bugs the stub tests had missed: every `loop` treated iteration 1 as stagnant, executors' `CHANGES` sections leaked into `best.md`, and two workers answered only "Posted.".
 
+v0.5.1 came from the tool reviewing itself at scale: `mass -m "claude-sonnet-5*100" -S claude-opus-5-5`, with 100 read-only Sonnet agents split across ten areas (core, tournament, chat, installer, tests, docs, security, scale, code debt, UX). The run finished 118 of 118 sessions (100 workers, 17 sub-judges, one final judge) for $75.53. The final verdict had five P1 groups, each checked against the cited lines: judge sessions without rate-limit retry, a `loop` that could accept a lower-scoring answer, an `--uninstall` that went on after refusing its prefix, terminal escape injection through board posts, and docs that promised behaviour the code did not have. Three Sonnet agents fixed them in separate worktrees for $9.32, with a regression test for each change.
+
 ## Comparison
 
 Honest one-liners; all of these are good tools with different goals.

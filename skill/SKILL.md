@@ -3,7 +3,7 @@ name: swarm
 description: Run cooperating Claude Code and Codex workers with independent answers, critique rounds, a message board and a judge. Use for tasks with 2+ independent parts, anything worth a second opinion (architecture, hard bugs, reviews, research, estimates), or when the user asks for a swarm / all models / "рой" / "все модели"; skip trivial single-step work. Workers must not launch swarms or subagents.
 ---
 
-# Swarm 0.5.0
+# Swarm 0.5.1
 
 Use this directory's `swarm.sh`. Requires Bash 4.3+, jq, GNU coreutils,
 procps (`pgrep`), and authenticated harnesses; Git for worktrees.

@@ -134,7 +134,7 @@ reject() { if "$@" >"$T/reject.log" 2>&1; then fail "accepted: $*"; fi; }
 has() { local contents; contents=$(cat "$1"); grep -Fq -- "$2" <<< "$contents" || fail "missing $2 in $1"; }
 not_has() { local contents; contents=$(cat "$1"); if grep -Fq -- "$2" <<< "$contents"; then fail "unexpected $2 in $1"; fi; }
 rc_is() { local want=$1 rc=0; shift; "$@" >"$T/rc.log" 2>&1 || rc=$?; [[ $rc == "$want" ]] || fail "rc $rc (want $want): $*"; }
-[[ $("$S" version) == 0.5.0 ]] || fail version
+[[ $("$S" version) == 0.5.1 ]] || fail version
 has <("$S" --help) 'watch DIR'
 [[ $("$S" roster | wc -l) == 4 ]] || fail roster
 [[ $(env -u SWARM_CODEX_MODELS "$S" roster | tail -1) == gpt-test ]] || fail discovery
