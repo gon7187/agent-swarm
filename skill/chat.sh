@@ -33,7 +33,7 @@ events() {
     elif grep -qsiE 'rate.?limit|429|too many requests|overloaded' "${f%.rc}.log" "${f%.rc}.stderr"; then why='rate limited'
     elif [[ $rc == 65 ]]; then why='empty or incomplete answer'; fi
     jq -cn --arg ts "$(iso "$(stat -c %Y "$f")")" --arg m "$id dropped out ($why)" '{ts:$ts,kind:"sys",msg:$m,bad:true}'
-  done < <(find "$dir" -path "$dir/a" -prune -o -name '*.rc' ! -name 'judge*.rc' -print 2>/dev/null)
+  done < <(find "$dir" \( -path "$dir/a" -o \( -type d -name j \) \) -prune -o -name '*.rc' ! -name 'judge*.rc' ! -name '*.attempt*.rc' -print 2>/dev/null)
   [[ -s $dir/final.md ]] && jq -cn --arg ts "$(iso "$(stat -c %Y "$dir/final.md")")" '{ts:$ts,kind:"sys",msg:"verdict ready: final.md"}'
   return 0
 }
@@ -61,7 +61,8 @@ render() {
           | if ($e.kind // "") != "sys" then .last[$e.from] = $msg else . end)
       | .out[]
       | [(.kind // "msg"), .hm, (.from // ""), (.to // "all"), (if .bad then "1" else "" end),
-         (.quote | gsub("[\n\t]"; " ")), (.msg | gsub("\t"; " ") | gsub("\n"; "\u001f"))] | @tsv' |
+         (.quote | gsub("[\u0000-\u0008\u000b-\u001e\u007f]"; "") | gsub("[\n\t]"; " ")),
+         (.msg | gsub("[\u0000-\u0008\u000b-\u001e\u007f]"; "") | gsub("\t"; " ") | gsub("\n"; "\u001f"))] | @tsv' |
     gawk -F'\t' -v cols="$cols" -v maxl="$max_lines" -v namefile=<(names) '
       BEGIN {
         while ((getline l < namefile) > 0) { split(l, nm, "\t"); model[nm[1]] = nm[2] }

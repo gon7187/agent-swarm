@@ -54,6 +54,12 @@ if [[ $engine == codex && ${SWARM_AGENT_DIR##*/} != judge ]]; then
   [[ $prompt != *EXHAUST* ]] || { cat "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
   [[ $prompt != *RLITEM* ]] || { head -n 4 "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
 fi
+if [[ $engine == codex && $prompt == *JUDGE429* && ${SWARM_AGENT_DIR##*/} == judge && ! -e $TEST_ROOT/judge429-hit ]]; then
+  touch "$TEST_ROOT/judge429-hit"; echo '{"type":"error","message":"429 Too Many Requests"}'; exit 1
+fi
+if [[ $engine == codex && $prompt == *SUBJUDGE429* && ${SWARM_AGENT_DIR##*/} == judge-L1-g1 && ! -e $TEST_ROOT/subjudge429-hit ]]; then
+  touch "$TEST_ROOT/subjudge429-hit"; echo '{"type":"error","message":"429 Too Many Requests"}'; exit 1
+fi
 if [[ $prompt == *TREE* || ( ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-tree ) ]]; then
   bash -c 'trap "" TERM; echo "$BASHPID" > "$TEST_ROOT/descendant"; while :; do sleep 1; done' &
   wait
@@ -127,6 +133,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 reject() { if "$@" >"$T/reject.log" 2>&1; then fail "accepted: $*"; fi; }
 has() { local contents; contents=$(cat "$1"); grep -Fq -- "$2" <<< "$contents" || fail "missing $2 in $1"; }
 not_has() { local contents; contents=$(cat "$1"); if grep -Fq -- "$2" <<< "$contents"; then fail "unexpected $2 in $1"; fi; }
+rc_is() { local want=$1 rc=0; shift; "$@" >"$T/rc.log" 2>&1 || rc=$?; [[ $rc == "$want" ]] || fail "rc $rc (want $want): $*"; }
 [[ $("$S" version) == 0.5.0 ]] || fail version
 has <("$S" --help) 'watch DIR'
 [[ $("$S" roster | wc -l) == 4 ]] || fail roster
@@ -139,6 +146,10 @@ git -c user.name=Test -c user.email=test@example.com commit --allow-empty -qm in
 "$S" post "$T/board" bob private carol
 not_has <("$S" read "$T/board" alice) private
 has <("$S" read "$T/board" carol) private
+# A board message cannot smuggle terminal escapes into an operator's terminal via read/watch.
+"$S" post "$T/escboard" mallory $'\x1b[2Jinjected text'
+not_has <("$S" read "$T/escboard") $'\x1b'
+has <("$S" read "$T/escboard") 'injected text'
 for i in {1..10}; do "$S" post "$T/board" "$i" parallel & done
 wait
 [[ $(jq -s length "$T/board"/a/*/outbox.jsonl) == 12 ]] || fail outboxes
@@ -184,9 +195,12 @@ reject "$S" all -j 0 hello
 reject "$S" all -q 0 hello
 reject "$S" all -q 3 hello
 reject "$S" all -r nope hello
-reject "$S" all -t
 reject "$S" all -m '../escape' hello
 reject "$S" all -m 'sonnet sonnet' hello
+rc_is 2 "$S" all -z hello
+has "$T/rc.log" 'invalid option: -z'
+rc_is 2 "$S" all -t
+has "$T/rc.log" 'option -t requires an argument'
 for line in \
   '{"id":"../escape","model":"gpt-test","prompt":"hello"}' \
   '{"id":"writer","model":"sonnet","prompt":"hello","mode":"ro","worktree":true}' \
@@ -434,7 +448,6 @@ rm .git/hooks/pre-commit
 not_has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r1/a1.diff"
 has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r2/a1.diff"
 # --- v0.5: model[@effort][*count] specs.
-rc_is() { local want=$1 rc=0; shift; "$@" >"$T/rc.log" 2>&1 || rc=$?; [[ $rc == "$want" ]] || fail "rc $rc (want $want): $*"; }
 "$S" all -r 1 -m 'sonnet@xhigh gpt-test@high' -S claude-other@low -o "$T/effort" hello >/dev/null
 grep -A1 -Fx -- --effort "$T/effort"/a/a*/argv | grep -Fq xhigh || fail claude-effort
 has <(cat "$T/effort"/a/a*/argv) model_reasoning_effort=high
@@ -475,6 +488,10 @@ script BAD 'STOP 80 a2 0'
 loop -o "$T/loop-retry" hello >/dev/null 2>&1
 [[ -f $T/loop-retry/it1/judge.attempt1.md ]] || fail judge-attempt-kept
 has "$T/loop-retry/it1/judge.prompt" 'DECISION FORMAT ERROR'
+# A new best must score at least the incumbent: the loop must not accept a worse answer.
+script 'CONTINUE 70 a1 0' 'CONTINUE 60 a2 70' 'CONTINUE 65 a2 70'
+rc_is 65 loop -o "$T/loop-worse" hello
+has "$T/rc.log" 'a new best must score at least the incumbent'
 # STOP with defects and text after the fence are both invalid: rc 65, then resume finishes without rerunning executors.
 script 'STOP 90 a1 0 DEFECTS' 'STOP 90 a1 0 TRAIL' 'STOP 90 a1 0'
 rc_is 65 loop -o "$T/loop-bad" hello
@@ -516,6 +533,10 @@ rc_is 4 loop -I 2 -o "$T/loop-maxit" hello
 script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70'
 rc_is 4 loop -B 5 -o "$T/loop-budget" hello
 [[ $(jq -r .stop_reason "$T/loop-budget/result.json") == max-sessions && $(wc -l < "$T/loop-budget/loop.jsonl") == 1 ]] || fail loop-max-sessions
+# A mass loop's -B budget must count the tournament's sub-judge sessions too, before they run.
+script 'STOP 90 a1 0'
+rc_is 4 env SWARM_GROUP=4 SWARM_TOP=1 "$S" loop -m 'sonnet*13' -S claude-other -B 15 -o "$T/loop-budget-mass" hello
+[[ $(jq -r .stop_reason "$T/loop-budget-mass/result.json") == max-sessions && ! -s $T/loop-budget-mass/loop.jsonl ]] || fail loop-budget-subjudge
 script 'PAUSE 40 a1 0'
 rc_is 4 loop -o "$T/loop-pause" hello
 # stop DIR during a slow iteration lets it finish, then stops.
@@ -543,6 +564,9 @@ grep -Eq 'sonnet@low +claude +21' "$T/rc.log" || fail preview-table
 "$S" mass -m 'sonnet*13' -S claude-other -o "$T/mass" hello 2> "$T/mass.err" >/dev/null
 [[ $(jq .quorum "$T/mass/run.json") == 8 && $(jq .rounds "$T/mass/run.json") == 1 && ! -d $T/mass/r2 ]] || fail mass-alias
 has "$T/mass.err" '13 agents × 1 rounds + 2 sub-judges + judge = 16 sessions; quorum 8'
+# mass has no rounds; -r after the alias's own -r 1 must not silently win.
+rc_is 2 "$S" mass -m sonnet -S claude-other -r 3 hello
+has "$T/rc.log" 'mass has no rounds'
 # 100 agents never exceed -j.
 mkdir "$T/conc"
 "$S" all -y -r 1 -j 3 -m 'sonnet*100' -S claude-other -o "$T/hundred" CONC >/dev/null 2>&1
@@ -577,10 +601,25 @@ reject "$S" all -r 1 -m gpt-test -S claude-other -o "$T/rlitem" RLITEM
 # Overridable pattern; after three requeues the failure stands.
 reject env SWARM_BACKOFF_BASE=0 SWARM_RATELIMIT_RE=custom-throttle "$S" all -r 1 -m sonnet -S claude-other -o "$T/customrl" CUSTOMRL
 [[ $(cat "$T/customrl/r1/a1.rc") == 76 && -f $T/customrl/r1/a1.attempt3.rc && ! -f $T/customrl/r1/a1.attempt4.rc ]] || fail custom-ratelimit
+# run_guarded: judge sessions (final judge, loop judge, tournament sub-judge) also
+# skip dead engines, wait out cooldowns and retry a transient rc 76, like run_pass.
+rm -f "$T/judge429-hit"
+SWARM_BACKOFF_BASE=0 "$S" all -r 1 -m sonnet -S gpt-test -o "$T/judgerate" JUDGE429 >/dev/null 2>&1
+[[ $(cat "$T/judgerate/final.attempt1.rc") == 76 && $(cat "$T/judgerate/final.rc") == 0 && -s $T/judgerate/final.md ]] || fail judge-rate-retry
+rm -f "$T/judge429-hit"
+script 'STOP 90 a1 0'
+SWARM_BACKOFF_BASE=0 loop -S gpt-test -o "$T/loopjudgerate" JUDGE429 >/dev/null 2>&1
+[[ $(cat "$T/loopjudgerate/it1/judge.attempt1.rc") == 76 && $(cat "$T/loopjudgerate/it1/judge.rc") == 0 ]] || fail loop-judge-rate-retry
+[[ $(jq -r .stop_reason "$T/loopjudgerate/result.json") == ideal ]] || fail loop-judge-rate-result
+rm -f "$T/subjudge429-hit"
+SWARM_BACKOFF_BASE=0 "$S" all -y -r 1 -m 'sonnet*10 gpt-test*10' -S gpt-other -o "$T/tour-rate" SUBJUDGE429 >/dev/null 2>&1
+[[ $(cat "$T/tour-rate/j/L1/g1.attempt1.rc") == 76 && $(cat "$T/tour-rate/j/L1/g1.rc") == 0 ]] || fail subjudge-rate-retry
+not_has "$T/tour-rate/failures.jsonl" subjudge-invalid
 # -M: the judge may write merged text, but never STOP in that iteration; off by default.
 script 'CONTINUE 80 MERGED 0 MERGE' 'STOP 90 INCUMBENT 90'
 loop -M -o "$T/loop-merge" hello >/dev/null 2>&1
 [[ $(cat "$T/loop-merge/final.md") == 'merged text' && -s $T/loop-merge/it1/merged.md ]] || fail loop-merge
+[[ $(jq -r .best "$T/loop-merge/result.json") == it1/merged.md ]] || fail loop-merge-result-best
 script 'CONTINUE 80 MERGED 0 MERGE' 'CONTINUE 80 MERGED 0 MERGE'
 rc_is 65 loop -o "$T/loop-nomerge" hello
 has "$T/rc.log" 'MERGED is not enabled'
@@ -655,12 +694,23 @@ C="$T/chat"; mkdir -p "$C/a/a1" "$C/a/a2" "$C/r1"
 printf 'a1\tsonnet\t\na2\tgpt-test\thigh\n' > "$C/anon.map"
 jq -cn '{ts:"2026-01-01T10:00:00.000000000Z",from:"a1",to:"all",msg:"first idea\\nsecond line"}' > "$C/a/a1/outbox.jsonl"
 jq -cn '{ts:"2026-01-01T10:01:00.000000000Z",from:"a2",to:"a1",msg:"REFUTED: wrong"}' > "$C/a/a2/outbox.jsonl"
+jq -cn '{ts:"2026-01-01T10:02:00.000000000Z",from:"a1",to:"all",msg:"danger\u001b[2Jinjected"}' >> "$C/a/a1/outbox.jsonl"
 echo 1 > "$C/r1/a2.rc"; cp "$FIXTURES/codex-usage-limit.jsonl" "$C/r1/a2.log"
+# A retried worker (final rc 0, stashed failed attempt) and a tournament sub-judge must not
+# be reported as a dropped-out agent.
+mkdir -p "$C/it1/j/L1"
+echo 76 > "$C/it1/a3.attempt1.rc"; echo 0 > "$C/it1/a3.rc"
+echo 1 > "$C/it1/j/L1/g1.rc"
+raw_out=$("$S" watch "$C")
+[[ $raw_out != *$'\x1b[2Jinjected'* ]] || fail chat-escape-injection
 chat_out=$("$S" watch "$C" | sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g')
 grep -q '╭─ a1 · sonnet ' <<< "$chat_out" || fail chat-bubble
 grep -q 'a2 · gpt-test@high' <<< "$chat_out" || fail chat-effort-label
 grep -q '↩ a1: first idea second line' <<< "$chat_out" || fail chat-reply-quote
 grep -q '│ second line' <<< "$chat_out" || fail chat-multiline
+grep -qF 'danger[2Jinjected' <<< "$chat_out" || fail chat-escape-stripped
 grep -q 'a2 dropped out (usage limit)' <<< "$chat_out" || fail chat-dropout
+not_has <(printf '%s' "$chat_out") 'attempt1 dropped out'
+not_has <(printf '%s' "$chat_out") 'g1 dropped out'
 plain_out=$("$S" watch "$C" --plain); grep -q "^AGENT STATE" <<< "$plain_out" || fail watch-plain
 printf 'All tests passed.\n'
