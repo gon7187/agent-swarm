@@ -1,6 +1,6 @@
 # Recipes
 
-Five patterns that pay for the extra tokens. Run all of them from the project root; outputs land in `.swarm/<timestamp>/`.
+Seven patterns that pay for the extra tokens. Run all of them from the project root; outputs land in `.swarm/<timestamp>/`.
 
 General rule for prompts: make them self-contained. State the goal, the constraints, the files that matter and the output format you want. Agents do not see your chat history. They do follow the project's `CLAUDE.md` / `AGENTS.md`, so project conventions need not be repeated.
 
@@ -106,6 +106,37 @@ Drop findings you cannot back with a failure scenario."
 ```
 
 The critique round is what makes this useful: false positives from one model tend to get refuted by the others on the board, and the judge keeps what survived. Verify each remaining finding yourself before acting on it.
+
+## 6. Polish to ideal with a cheap loop
+
+`all` gives you a fixed number of rounds; `loop` keeps iterating, judged every time, until the judge finds no material defect left or gives up. Use it when there's one artifact you want genuinely right, not five competing opinions.
+
+```bash
+swarm loop -m "gpt-6-luna@low*2 gpt-6-luna@medium" -S claude-opus-5-5@high -K 3 -M "
+Write a Postgres migration that adds a NOT NULL 'tenant_id' column to a 50M-row table
+with zero downtime. Output: the migration SQL, the backfill plan, and the rollback plan."
+swarm wait .swarm/<run> -t 300
+cat .swarm/<run>/best.md
+```
+
+Why the model mix works: the judge is the one component that must be reliable — it is the only thing standing between "different" and "genuinely better". The executors just need to generate candidates and follow the judge's directions, so they can be cheap and mixed-effort (`gpt-6-luna@low*2 gpt-6-luna@medium` here); spend the real budget on a strong judge (`-S claude-opus-5-5@high`). `-M` lets the judge assemble a merged answer from the strongest parts of two candidates instead of picking one wholesale — useful for text tasks, not offered with `-w`.
+
+There is no iteration cap by design: a stalled loop escalates (after `-K` stalls the judge must state a `strategy_change`) rather than quietly stopping. If you want a hard backstop anyway, add `-I max_iter` or `-B max_sessions`; otherwise stop it yourself with `swarm stop .swarm/<run>` once you're satisfied, or let it run to `STOP`/`PAUSE`. Read `loop.jsonl` for the score history and `it<k>/decision.json` for what the judge asked for at each step.
+
+## 7. Mass exploration with 100 agents
+
+For genuinely open questions, breadth beats a second opinion: run the same prompt across dozens of cheap agents and let a tournament of judges find what's worth reading.
+
+```bash
+swarm mass -m "gpt-6-luna@medium*50 claude-sonnet-5@medium*50" -S claude-opus-5-5@xhigh -y "
+Find every way tests/test_upload.py::test_concurrent_upload could produce
+'duplicate key value violates unique constraint uploads_pkey'.
+List each distinct hypothesis with file:line and how you would prove or disprove it."
+```
+
+`mass` is `all -r 1` under the hood: every agent answers independently, no critique round. Past `SWARM_MASS_AT` agents (default 12) the preview table and `-y` confirmation kick in automatically — with 100 agents you are well over it, hence `-y` above. Quorum defaults to `ceil(0.6N)` for `mass`, so if a few agents hit a rate limit and exhaust their retries, the run still finishes; a whole engine running out of quota mid-run marks it dead and skips its remaining queue rather than failing everything already collected. Judging scales the same way: agents are grouped and sub-judged in batches of 8, and the final judge reads only what survived plus the sub-judges' notes, instead of one judge reading a hundred files.
+
+For hypothesis-generation tasks like this, resist the urge to add `-r 2` peer critique by default — independence is the point here, the same reason round 1 of `all` doesn't read the board. Add it only once you have reason to think agents are duplicating each other's blind spots.
 
 ## Keeping cost down
 

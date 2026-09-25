@@ -111,3 +111,65 @@ The judge's output is `final.md`. Its answer is not majority vote; read it criti
 ## 6. `run` mode
 
 `swarm.sh run tasks.jsonl` uses the same board, outboxes, isolation and failure handling, but no rounds and no judge: all tasks start at once and coordination happens on the board. Tasks that depend on another task's committed output belong in separate, phased runs; see [recipes.md](recipes.md#3-parallel-feature-in-worktrees). Ids come from the task `id`, not from anonymization. See the README for the task format and the rules for `mode`, `worktree` and `shared`.
+
+## 7. `loop` mode: judge-driven iteration
+
+`swarm.sh loop` replaces "fixed rounds, then a judge" with "iterations, each scored by a judge, until the judge is done". Where `all` fans out N agents and merges their views once, `loop` refines a single candidate repeatedly. See the README for the full flag reference; this section covers the protocol.
+
+```mermaid
+sequenceDiagram
+    participant U as swarm.sh
+    participant A as executors
+    participant J as judge
+    U->>A: iteration 1: task (independent, like round 1)
+    A-->>U: it1/<id>.md
+    U->>J: candidates + best.md=NONE
+    J-->>U: decision.json {verdict, score, incumbent_score, best, defects, directions}
+    U->>U: best.md := chosen candidate (atomic copy)
+    loop while verdict == CONTINUE
+        U->>A: it<k>: task + best.md + last defects/directions + tried directions
+        A-->>U: it<k>/<id>.md ending CHANGES: then FINAL ANSWER
+        U->>J: this iteration's candidates + best.md
+        J-->>U: decision.json
+        U->>U: update best.md, loop.jsonl
+    end
+    U->>U: STOP -> final.md, rc 0. PAUSE / -I / -B / stop DIR -> rc 4
+```
+
+- **Iteration 1** is independent, exactly like round 1 of `all`: no executor sees another's draft.
+- **Iteration k ≥ 2.** Every executor gets the task, the immutable `best.md`, the previous `decision.json`'s `defects` and `directions`, and the running list of directions already tried without gain. There is no peer reading between executors and no separate critique round in `loop` — the judge's `directions` **are** the critique that would otherwise come from other agents. The answer must end with a `CHANGES:` section describing what changed from `best.md`, then `FINAL ANSWER`, checked the same way `has_final` checks `all`/`run` answers.
+- **The judge** sees only this iteration's candidates and `best.md` — not the board, not earlier iterations' candidates, not `evidence()`'s global view used by `all`. It scores the incumbent and the best new candidate in the same judgment (so scores never drift across iterations) and selects the new best:
+  - `INCUMBENT` — nothing this iteration beat it;
+  - an executor id — that candidate becomes the new `best.md`;
+  - `MERGED` (only with `-M`, text tasks only, never in `-w`) — the judge writes the merged text itself, delimited by `=== BEST ===` / `=== END BEST ===`. The judge may not also verdict `STOP` in the iteration where it picks `MERGED`: a merge is a claim that more work may still be needed, not a final answer.
+- **Decision format.** The judge ends with exactly one fenced ` ```json ` block and nothing after it:
+  ```json
+  {"verdict":"CONTINUE","score":82,"incumbent_score":78,"best":"a3",
+   "defects":["..."],"directions":["..."],"strategy_change":""}
+  ```
+  Validated: `verdict` is one of `STOP|CONTINUE|PAUSE`; `score`/`incumbent_score` are integers 0-100; `best` is `INCUMBENT`, `MERGED` (only if `-M` is set), or a candidate id from this iteration; `STOP` requires an empty `defects` list; `CONTINUE` requires both non-empty `defects` and non-empty `directions`; during a stagnation escalation (see below) `CONTINUE` also requires a non-empty `strategy_change`. At iteration 1 there is no incumbent, so `incumbent_score` is `0` and `best == INCUMBENT` is rejected (there is nothing to be the incumbent yet).
+  A decision that fails validation is retried once, with `DECISION FORMAT ERROR: <reason>` appended to the judge's prompt. A second failure sets the judge's `.rc` to 65; the iteration is not committed, and `swarm.sh judge DIR` or `swarm.sh resume DIR` picks it back up. A malformed decision is never treated as `STOP`.
+- **Termination.** `gain = score − incumbent_score`, both from the same judgment. An iteration is **stalled** when `gain < 1` or the judge picked `INCUMBENT`. After `-K` (default 3) consecutive stalls, the judge's prompt gains a stagnation notice, and a `CONTINUE` verdict must supply a `strategy_change` that has not been used before. **Oscillation** — the same `best.md` content (its git tree SHA, in `-w`) recurring — is flagged to the judge the same way, so it can choose a genuinely different direction rather than looping between two local optima. The orchestrator never stops the loop on its own reasoning: only `STOP`, `PAUSE`, `-I`/`-B` limits or `stop DIR` end it. There is no hidden iteration cap.
+- **Operator brakes**, off unless set: `swarm.sh stop DIR` (checked between iterations, via `DIR/STOP`), `-I max_iter`, `-B max_sessions`.
+- **Exit codes:** `0` STOP/ideal, `4` PAUSE or an operator limit (resumable), `65` judge failed twice, `1` quorum not met, `130`/`143` on a signal. `75` stays reserved for `wait DIR`'s "still running" — a `loop` run is never done with rc 75.
+- **rw loop (`-w`).** Each iteration's worktrees are `swarm/<run>/i<k>/<id>`; iteration k+1's agents branch from the head of the chosen branch, validated the same way a `WINNER` branch is validated in `all -w`. `MERGED` is forbidden in rw. Nothing is ever merged into your checkout automatically — `loop` picking a candidate only moves `best.md` and the run's own branches. Worktrees for an iteration's losing candidates are removed once the iteration is accepted; their branches are kept for inspection.
+- **Layout:** `DIR/run.json` (`kind:"loop"`, judge model+effort, `stall_k`, `max_iter`, `max_sessions`, `merge`), `DIR/best.md`, `DIR/loop.jsonl` (one row per iteration), `DIR/final.md`, `DIR/result.json`, `DIR/STOP` when requested; per iteration, `DIR/it<k>/aN.{prompt,md,log,stderr,usage,rc}`, `DIR/it<k>/judge.{prompt,md,log,stderr,rc}`, `DIR/it<k>/decision.json`. `decision.json` is written last and is what marks an iteration committed; `resume` finds the first iteration without one.
+
+## 8. `mass` mode: many agents, cheaply judged
+
+`mass` adds no orchestration path of its own: `swarm.sh mass [opts] "task"` is `swarm.sh all -r 1 [opts] "task"`, and any `*count` in a model spec already lets `all` or `loop` run dozens of agents the same way. What changes above `SWARM_MASS_AT` agents (default 12) is how the run confirms itself, tolerates one engine failing, and how the judge scales.
+
+- **Preview and confirmation.** Before anything starts, the usual "N × R + 1 sessions" line becomes a table of spec, engine, count and total sessions, with quorum shown alongside (USD stays `unknown`, as everywhere else). Above `SWARM_CONFIRM_OVER` sessions (default 20), a TTY is asked to confirm; a non-TTY without `-y` fails with exit code 2 before any agent starts.
+- **Quorum** defaults to `ceil(0.6N)` for `mass` (the `all` default is unchanged), so a handful of failed agents out of a hundred does not turn the whole run into a hard failure; `-q` still overrides it.
+- **Rate limits are the orchestrator's job, not the agent's.** Classification only looks at the exit code / `is_error` and at error events or stderr, never at answer text (an agent that merely discusses "rate limiting" in its answer is not touched):
+  - **Transient** (`rate.?limit|429|too many requests|overloaded|529`, overridable via `SWARM_RATELIMIT_RE`): the agent gets rc 76, its attempt is renamed to `aN.attempt<n>.*` so nothing is overwritten, and it is requeued up to 3 times with backoff `min(900, BASE·2^n)` plus jitter (`SWARM_BACKOFF_BASE`), recorded per engine in `.backoff/<engine>`.
+  - **Exhausted** (`usage.?limit|quota|insufficient.?credit` — Codex's own message is *"You've hit your usage limit..."*): the agent gets rc 77, that engine is marked dead for the rest of the run, and its remaining queued agents are skipped rather than attempted. Both outcomes are logged in `failures.jsonl` and reflected in `PARTIAL`.
+  - Models are never substituted for a different one automatically, on either path.
+- **Critique stays off by default** (`-r 1`, i.e. `mass` itself). With `-r 2`, a deterministic ring gives every answer exactly `P` peer readers (default 4) instead of everyone reading everyone (O(N·P), not O(N²)); the mapping is stored in `r2/peers.json`.
+- **Judging is a tournament.** Agents are stratified round-robin into groups of `G = 8` by `model@effort`. Each sub-judge (id `judge-L<n>-g<m>`, its own lock) reads only its group and ends with a fenced JSON `{"top":[...],"minority":[...]}`; an invalid sub-judge decision advances its whole group rather than dropping anyone silently. Levels repeat until at most `G` answers remain, and the final judge reads the survivors plus every sub-judge's report. 100 answers forwarding the top 1 per group is 16 judge sessions total (13 first-level groups + 2 more levels + 1 final); forwarding the top 2 is 18. Only exact duplicates are collapsed (by sha256), and judges are told `aN ≡ aM` rather than seeing the same text twice.
+- **Board stays scoped.** `mass` prompts never carry the global last-60-messages tail; a sub-judge sees only its own group's messages; `post` is capped at 2 KB per message and 20 messages per outbox. `swarm.sh read DIR` for a human operator is unaffected.
+- **Anonymity is unchanged:** ids are still shuffled `a1..aN`, and effort still never appears in a prompt.
+- **Layout:** `r1/a1..a100.*`, `j/L<n>/g<m>.*` for tournament levels, `.backoff/`, `failures.jsonl`.
+- **`mass` inside `loop`.** A `loop` iteration with more executors than `G` runs its own tournament, and only the top judge writes the iteration's `decision.json`. `-X` further limits the mass-sized roster to iteration 1 — explore wide once, then refine with a smaller, cheaper set of executors in later iterations.
+
+Ring critique, tournament judging, board caps and `-X` are the most recently designed pieces of this protocol — **v0.5.0 if they land at merge time; otherwise they follow in a later release.**

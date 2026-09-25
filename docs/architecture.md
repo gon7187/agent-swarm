@@ -11,6 +11,17 @@
 
 In `tasks.jsonl` an explicit `"engine": "claude" | "codex"` overrides the name-based choice. Binaries can be replaced with `SWARM_CLAUDE_BIN` / `SWARM_CODEX_BIN`, which is how `tests/test.sh` runs the whole flow offline against stubs.
 
+### Model spec and effort
+
+A model spec, `model[@effort][*count]`, is parsed and the `*count`/`@effort` parts stripped before `safe_name` validates the bare model name; see the README for the full grammar. `*count` never reaches the engine command line, it only controls how many agent ids get that `model@effort`. `@effort`, when present, is passed straight through:
+
+| Engine | Argv addition |
+|---|---|
+| Claude Code | `--effort <effort>` (one of `low\|medium\|high\|xhigh\|max`, validated before the run starts) |
+| Codex | `-c model_reasoning_effort=<effort>` (checked against that model's `supported_reasoning_efforts` from `codex debug models`, which `roster()` already fetches and caches; on discovery failure the effort is passed through unchanged with a warning) |
+
+`anon.map` rows become `id<TAB>model<TAB>effort`; `run.json`'s `agents[]` and `judge` fields gain an `effort` key alongside `model`. Effort is not interpolated into any prompt text.
+
 The roster (`swarm.sh roster`) is the union of:
 
 - Claude models from `$SWARM_CLAUDE_MODELS` (default `claude-fable-5-1 claude-opus-5-5 claude-sonnet-5 claude-haiku-4-5`), if `claude` is on `PATH`;
@@ -113,4 +124,33 @@ Nothing is merged automatically. The judge ends with `WINNER: <branch>` or `WINN
 ├── result.json                # {rc, final, partial, winner, branches}, written atomically at the end
 ├── orchestrator.log           # -d: the detached orchestrator's output
 └── <id>.md / .log / .rc       # run: one set per task
+```
+
+### `loop` layout
+
+```text
+<run>/                         # kind:"loop" in run.json
+├── run.json                   # kind, judge{model,effort}, stall_k, max_iter, max_sessions, merge
+├── task.md  anon.map
+├── best.md                    # current-best answer, replaced atomically each accepted iteration
+├── loop.jsonl                 # {it,verdict,score,incumbent_score,gain,best,best_sha,stalled,osc,sessions,cost_usd,ts}
+├── it1/                       # one dir per iteration
+│   ├── a1.{prompt,md,log,stderr,usage,rc} ...
+│   ├── judge.{prompt,md,log,stderr,rc}
+│   └── decision.json          # written last; marks the iteration committed
+├── it2/ ...
+├── final.md  result.json      # result.json gains kind, ideal, stop_reason, iterations, best, score_history, cost
+└── STOP                       # present after `swarm.sh stop DIR`, removed once honored
+```
+
+### `mass` layout
+
+```text
+<run>/                         # -r 1 (mass) or *count under all/loop
+├── r1/a1.* ... a100.*         # same per-agent files as a normal round
+├── j/L1/g1.* ... g13.*        # sub-judges, one per group of up to 8
+├── j/L2/... j/final.*         # further tournament levels, then the top judge
+├── .backoff/<engine>          # next-retry time per engine, for rate-limit backoff
+├── failures.jsonl             # every retry, skip and rate-limit classification
+└── r2/peers.json              # -r 2 only: the ring's peer-review mapping
 ```
