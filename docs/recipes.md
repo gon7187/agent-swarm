@@ -2,7 +2,9 @@
 
 Five patterns that pay for the extra tokens. Run all of them from the project root; outputs land in `.swarm/<timestamp>/`.
 
-General rule for prompts: make them self-contained. State the goal, the constraints, the files that matter and the output format you want. Agents do not see your chat history.
+General rule for prompts: make them self-contained. State the goal, the constraints, the files that matter and the output format you want. Agents do not see your chat history. They do follow the project's `CLAUDE.md` / `AGENTS.md`, so project conventions need not be repeated.
+
+When you start a recipe from inside Claude Code or Codex rather than a terminal, do not run it in the foreground: use Claude Code's `run_in_background`, or add `-d` and poll with `swarm wait .swarm/<run> -t 300` (0 = done, 75 = still running). See the README section on long runs.
 
 ## 1. Architecture review
 
@@ -34,33 +36,48 @@ Tips:
 
 - Paste the exact error text and the failing command; do not paraphrase.
 - Agents post hypotheses to the board early; from round 2 others must refute them with evidence instead of repeating the same investigation.
-- Default read-only mode is right here: you want diagnosis, not five competing patches.
+- Default read-only mode is right here: you want diagnosis, not five competing patches. To let read-only Claude agents run the failing test themselves, allow it explicitly: `SWARM_RO_ALLOW='Bash(uv run pytest:*)'`.
 
 ## 3. Parallel feature in worktrees
 
-Split a feature by file ownership, give each part to a model, and let them coordinate the contract on the board.
+Split a feature by file ownership and give each part to a model. All tasks in one `run` start at the same time, and every worktree is created from your current `HEAD`, so **one run is for independent tasks only**. If one part needs another part's committed output, split the work into phases: run, review and merge the first phase, then start the next one from the merged `HEAD`.
 
-`tasks.jsonl`:
+Here the API and the UI both depend on the schema and the API contract, so they are phase 2.
+
+`phase1.jsonl`, the shared foundation:
 
 ```jsonl
-{"id":"schema","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an 'invoices' table + migration in db/. Own only db/. Post the final column list to the board as soon as it is stable. Commit your work."}
-{"id":"api","model":"gpt-5.5","mode":"rw","worktree":true,"prompt":"Add CRUD endpoints for invoices in src/api/invoices/. Own only src/api/invoices/. Take the schema from the board (agent 'schema'); ask there if unclear. Include tests. Commit your work."}
-{"id":"ui","model":"claude-sonnet-5","mode":"rw","worktree":true,"prompt":"Add an invoices list page in web/src/pages/invoices/. Own only that dir. Take the API shape from the board (agent 'api'). Commit your work."}
+{"id":"schema","model":"claude-sonnet-5","worktree":true,"prompt":"Add an 'invoices' table + migration in db/, and write the REST contract for invoice CRUD (endpoints, request and response JSON) to docs/api/invoices.md. Own only db/ and docs/api/. Commit your work."}
+```
+
+`phase2.jsonl`, two independent tasks built on the merged contract:
+
+```jsonl
+{"id":"api","model":"gpt-5.5","worktree":true,"prompt":"Implement the invoice endpoints exactly as specified in docs/api/invoices.md, in src/api/invoices/. Own only src/api/invoices/. Include tests. If the contract is ambiguous, post the question to the board and state your assumption in your final message."}
+{"id":"ui","model":"claude-sonnet-5","worktree":true,"prompt":"Add an invoices list page in web/src/pages/invoices/ that uses the API in docs/api/invoices.md. Own only that dir. Commit your work."}
 ```
 
 ```bash
-SWARM_RW_ALLOW='Bash(npm test:*)' swarm run -j 3 tasks.jsonl
-git log --oneline swarm/<run>/schema swarm/<run>/api swarm/<run>/ui
-git merge swarm/<run>/schema swarm/<run>/api swarm/<run>/ui
-swarm clean .swarm/<run>
+swarm run phase1.jsonl
+git diff HEAD..swarm/<run1>/schema             # review, then merge
+git merge -- swarm/<run1>/schema
+swarm clean .swarm/<run1>
+
+SWARM_RW_ALLOW='Bash(npm test:*)' swarm run -j 2 phase2.jsonl
+git log --oneline swarm/<run2>/api swarm/<run2>/ui
+git merge -- swarm/<run2>/api swarm/<run2>/ui
+swarm clean .swarm/<run2>
 ```
+
+The `api` task runs on Codex, so it does not commit itself: the orchestrator commits its changes on `swarm/<run2>/api` when it finishes successfully. If that commit fails, the task gets `rc=71` and the changes stay in its worktree.
 
 Rules that keep this sane:
 
+- One run = tasks that can start from the same commit. Anything that needs another task's output goes into a later phase.
 - Every task names the directories it owns; nobody edits outside them.
-- Shared contracts (schema, API shape) are published on the board, with an explicit producer.
+- Shared contracts (schema, API shape) are committed files from an earlier phase, not board messages. The board is for questions and for reporting mismatches.
 - rw agents can edit and commit, nothing else; allow project commands such as a test runner with `SWARM_RW_ALLOW`.
-- You merge. Review each branch like a PR (`manifest.jsonl` lists base and head per agent).
+- You merge. Review each branch like a PR (`manifest.jsonl` lists base and head per agent). To drop a branch you do not want, name it explicitly: `swarm clean .swarm/<run> --discard swarm/<run>/<id>`.
 
 ## 4. Research
 
@@ -98,5 +115,6 @@ A run is `N × R + 1` sessions, and the number is printed before start.
 - `-m` with two or three models covers most second-opinion needs.
 - `-r 1` for independent opinions only; `-r 2` when you want debate; more rounds rarely help.
 - A cheaper judge (`-S claude-sonnet-5`) is fine when answers are likely to converge.
-- If only the judge failed, `swarm judge .swarm/<run>` reruns it without redoing the rounds.
-- `-q N` lets a run finish with N valid answers instead of stopping on the first failed agent.
+- If only the judge failed, `swarm judge .swarm/<run>` reruns it without redoing the rounds; if the run was interrupted, `swarm resume .swarm/<run>` reruns only the agents that did not finish.
+- `-q N` lets a run finish with N valid answers instead of stopping on the first failed agent. Failed agents drop out of later rounds.
+- From inside an agent, never run a long swarm in the foreground: a host timeout kills it and the finished work with it. Use `-d` + `swarm wait`.

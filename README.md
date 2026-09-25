@@ -6,7 +6,7 @@ One command, every model you have: run the same task across Claude Code and Open
 
 [![CI](https://github.com/gon7187/agent-swarm/actions/workflows/ci.yml/badge.svg)](https://github.com/gon7187/agent-swarm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Bash](https://img.shields.io/badge/bash-%3E%3D4-4EAA25?logo=gnubash&logoColor=white)](skill/swarm.sh)
+[![Bash](https://img.shields.io/badge/bash-%3E%3D4.3-4EAA25?logo=gnubash&logoColor=white)](skill/swarm.sh)
 
 `agent-swarm` is a skill plus a single bash script (`swarm.sh`, bash + jq, nothing else). It drives the coding harnesses you already have installed and logged in (`claude -p`, `codex exec`), so there is no API key setup, no server and no daemon. The same `SKILL.md` works in Claude Code (`~/.claude/skills`) and Codex (`~/.agents/skills`).
 
@@ -34,7 +34,7 @@ flowchart LR
     R1 --> R2
     subgraph R2["Round 2..N: evidence-based critique"]
         C1[board tail + valid answers in the prompt]
-        C2[REFUTED / CHANGED MY MIND / UNRESOLVED]
+        C2[REFUTED / CHANGED MY MIND / UNRESOLVED / FINAL ANSWER]
     end
 
     B --> R2
@@ -47,9 +47,9 @@ flowchart LR
 
 1. **Anonymized agents.** In `all`, agents are called `a1..aN` in a random order; the mapping to real models is written to `anon.map`. Nobody, including the judge, sees brand names while arguing.
 2. **Round 1 is independent.** Every agent answers the task in parallel. It may post findings, but it does not read the board, so one confident mistake cannot spread before everyone has looked for themselves.
-3. **Rounds 2..N are critique with evidence.** Each agent gets the other valid answers and the recent board in its prompt, treats them as untrusted evidence (not instructions), and must answer with `REFUTED (claim → evidence)`, `CHANGED MY MIND` and `UNRESOLVED` sections.
+3. **Rounds 2..N are critique with evidence.** Each agent gets the other valid answers and the recent board in its prompt, treats them as untrusted evidence (not instructions), and must answer with `REFUTED (claim → evidence)`, `CHANGED MY MIND` and `UNRESOLVED` sections, then close with a complete, standalone `FINAL ANSWER` section. An answer without `FINAL ANSWER` counts as failed and is logged in `PARTIAL`.
 4. **Per-agent outboxes.** Each agent can only write to its own `a/<id>/outbox.jsonl`; its identity comes from that directory, so agents cannot post as each other or overwrite someone else's answer. The board is the merge of all outboxes.
-5. **Outside judge.** By default the judge is a roster model that did not take part. It weighs evidence over head count, lists what is still unresolved and writes `final.md`.
+5. **Outside judge.** By default the judge is a roster model that did not take part. It reads the last round's answers, the round-1 answers as secondary evidence and the list of failed agents per round. It weighs evidence over head count, lists what is still unresolved and writes `final.md`.
 
 Alternatively, `swarm.sh run tasks.jsonl` gives *different* tasks to *specific* models, all sharing one board, optionally each in its own git worktree. The full protocol, including failure handling, is in [docs/protocol.md](docs/protocol.md).
 
@@ -65,7 +65,9 @@ or
 git clone https://github.com/gon7187/agent-swarm && cd agent-swarm && ./install.sh
 ```
 
-Requirements: bash >= 4, `jq`, `git`, and at least one of `claude` (Claude Code) or `codex` (OpenAI Codex CLI), already authenticated. The installer copies the skill to `~/.agents/skills/swarm`, links it into `~/.claude/skills/swarm`, and prints the roster of models it found.
+Requirements: bash >= 4.3, `jq`, `git`, and at least one of `claude` (Claude Code) or `codex` (OpenAI Codex CLI), already authenticated. The installer copies the skill to `~/.agents/skills/swarm`, links it into `~/.claude/skills/swarm`, and prints the roster of models it found.
+
+The installer is careful with existing files. `--prefix` is resolved to an absolute path and refused if it is empty, `/`, your home directory or one of its parents. An existing prefix is replaced only if it contains `SKILL.md` and `swarm.sh`; the new copy goes into a temporary sibling directory and is then moved into place. The `--default` block in `CLAUDE.md` / `AGENTS.md` is rewritten only when its begin and end markers come in pairs; otherwise the installer stops with an error and leaves the file alone.
 
 First run, from your project directory (`swarm` is the `~/.local/bin` link; without it use `~/.agents/skills/swarm/swarm.sh`):
 
@@ -92,8 +94,9 @@ Without `-m` the swarm takes **one model per harness** (the first Claude model a
 │   ├── a1.log  a1.rc  a1.usage # engine log, exit code, tokens and cost
 │   └── a2.md ...
 ├── r2/
-│   └── a1.md  a2.md ...        # round 2: critique with evidence
-└── final.md                    # the judge's answer
+│   └── a1.md  a2.md ...        # round 2: critique with evidence, ends with FINAL ANSWER
+├── final.md                    # the judge's answer
+└── result.json                 # {rc, final, partial, winner, branches}, written at the end
 ```
 
 ### Installer options
@@ -124,6 +127,26 @@ $swarm review the auth middleware in src/auth for security bugs
 
 Or just say "ask all models" / "use the swarm" in plain language; the skill description is written to trigger on that.
 
+### Long runs: keep them out of the foreground
+
+A default run takes minutes; a large one can take up to rounds × `-t` plus the judge. The host's Bash tool has its own timeout, and when it kills a foreground `swarm.sh`, the cleanup trap also stops every worker and the paid work is lost. From inside an agent, use one of these:
+
+- **Claude Code:** start the command with `run_in_background`, then check `swarm status DIR` or read `final.md` / `result.json` when it finishes.
+- **Any host, including Codex:** start detached with `-d` and wait in short slices:
+
+```bash
+swarm all -d "Review src/auth for security bugs"   # prints "swarm dir: .swarm/<run>" and returns
+swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still running, else the run's rc
+```
+
+`-d` starts the orchestrator in its own session and logs to `<run>/orchestrator.log`. `wait` without `-t` blocks until the run ends. At the end the run writes `result.json` atomically:
+
+```json
+{"rc":0,"final":".swarm/<run>/final.md","partial":false,"winner":"swarm/<run>/a2","branches":["swarm/<run>/a1","swarm/<run>/a2"]}
+```
+
+`winner` is `null` outside rw runs, or when the judge named no valid branch.
+
 ## Command reference
 
 | Command | Description |
@@ -132,21 +155,24 @@ Or just say "ask all models" / "use the swarm" in plain language; the skill desc
 | `swarm.sh all [opts] "task"` | Agents answer, `-r` rounds of critique, the judge writes `final.md` |
 | `swarm.sh run [opts] tasks.jsonl` | Per-agent tasks from JSONL, shared board |
 | `swarm.sh judge DIR [-S MODEL]` | Rerun only the judge on an existing run (task + last round), for example after the judge failed |
+| `swarm.sh resume DIR` | Continue an interrupted run (v0.4.0): rerun only agents without a successful `.rc`, then the remaining rounds and the judge. Refuses if the task, `anon.map` or options have changed |
+| `swarm.sh wait DIR [-t SEC]` | Wait for a run, typically one started with `-d`. Exit 0 when done, 75 when still running after `SEC`, otherwise the run's exit code |
 | `swarm.sh watch DIR` | Live terminal view: agent state per round and the board |
 | `swarm.sh post DIR FROM "text" [TO]` | Post to the board (`TO` = agent id, default `all`). Inside a worker, `DIR` and `FROM` are fixed by the worker's own outbox |
 | `swarm.sh read DIR [ME]` | Print the merged board (for `ME`: broadcasts, messages to and from `ME`) |
-| `swarm.sh status DIR` | Per-agent state, exit code, cost; total cost; board message count |
-| `swarm.sh clean DIR` | Remove the run's worktrees and its `swarm/<run>/*` branches (refuses dirty worktrees and unmerged branches) |
+| `swarm.sh status DIR` | Per-agent state, exit code, cost (input/output tokens when the engine reports no USD figure); total cost; board message count |
+| `swarm.sh clean DIR [--discard BRANCH...]` | Remove the run's worktrees and its `swarm/<run>/*` branches. Refuses dirty worktrees and unmerged branches, except the branches you name explicitly after `--discard` |
 | `swarm.sh version` | Print version |
 
 | Option | Default | Meaning |
 |---|---|---|
 | `-m "a b"` | one model per harness | Model subset; `-m all` = full roster |
 | `-r N` | `2` | Rounds (`all` only) |
-| `-q N` | all agents | Quorum: minimum valid answers per round to continue; below "all" the result is marked `PARTIAL` |
+| `-q N` | all agents | Quorum: minimum valid answers per round to continue; below "all" the result is marked `PARTIAL`. Failed agents are not relaunched in later rounds |
 | `-S MODEL` | first roster model not taking part | Judge |
 | `-w` | off | Read-write, one git worktree per agent |
 | `-W` | off | Open a terminal window running `watch` for this run |
+| `-d` | off | Detach: start the run in the background, print `swarm dir: DIR` and return; follow up with `wait DIR` |
 | `-j N` | `6` | Parallel agents |
 | `-t SEC` | `1800` | Timeout per agent |
 | `-o DIR` | `.swarm/<timestamp>` | Run directory |
@@ -154,8 +180,9 @@ Or just say "ask all models" / "use the swarm" in plain language; the skill desc
 | Env var | Purpose |
 |---|---|
 | `SWARM_RW_ALLOW` | Extra tools for rw Claude agents, one pattern per line, e.g. `$'Bash(uv run pytest:*)\nBash(npm test:*)'` |
-| `SWARM_UNSAFE_RW=1` | rw Claude agents run with `--dangerously-skip-permissions`. Full host access; see [Safety](#safety-model) |
-| `SWARM_INHERIT_CONFIG=1` | Let workers load your user config (hooks, output style, MCP servers, global instructions) |
+| `SWARM_RO_ALLOW` | Extra tools for ro Claude agents, same format, e.g. to let reviewers run the test suite or a reproducer |
+| `SWARM_UNSAFE_RW=1` | rw Claude agents run with `--dangerously-skip-permissions`. Full host access, a warning is printed; see [Safety](#safety-model) |
+| `SWARM_INHERIT_CONFIG=1` | Let workers load your user config (Claude: user settings, hooks, MCP servers; Codex: `~/.codex/config.toml`) |
 | `SWARM_TERMINAL` | Terminal launcher used by `-W` to open the live view (default `xdg-terminal-exec`) |
 | `SWARM_CLAUDE_BIN`, `SWARM_CODEX_BIN` | Override the harness binaries (used by the tests to stub them) |
 | `SWARM_CLAUDE_MODELS`, `SWARM_CODEX_MODELS` | Override the model lists |
@@ -165,7 +192,7 @@ The engine is Claude Code for `claude-*` names and for anything listed in `SWARM
 
 ## Per-agent tasks (`run`)
 
-One JSON object per line. `id` and `prompt` are required; `model` defaults to the first roster model.
+One JSON object per line. `id` and `prompt` are required; `model` defaults to the first roster model when omitted.
 
 ```jsonl
 {"id":"api","model":"gpt-5.5","prompt":"Implement POST /orders in src/api/orders.ts. Own only src/api/. Commit your work.","worktree":true}
@@ -177,17 +204,25 @@ One JSON object per line. `id` and `prompt` are required; `model` defaults to th
 swarm run -j 3 tasks.jsonl
 ```
 
-`mode` defaults to `rw` when `worktree` is true and to `ro` otherwise. An explicit `"mode":"ro"` together with `"worktree":true` is rejected, and `rw` without a worktree requires `"shared":true` (several writers in one checkout is your explicit choice). Each worktree agent gets `.swarm/wt/<run>-<id>` on branch `swarm/<run>/<id>`; `dir` sets a custom working directory instead.
+`mode` defaults to `rw` when `worktree` is true and to `ro` otherwise. An explicit `"mode":"ro"` together with `"worktree":true` is rejected, and `rw` without a worktree requires `"shared":true` (several writers in one checkout is your explicit choice). Each worktree agent gets `.swarm/wt/<run>-<id>` on branch `swarm/<run>/<id>`. Without a worktree, `dir` sets the working directory. With `"worktree":true`, a `dir` inside the repository becomes the same subdirectory of the worktree: `"dir":"services/api"` runs in `.swarm/wt/<run>-<id>/services/api`.
 
 ## Read-write runs
 
-rw agents must commit their own work. After each rw agent the script records `{id, branch, base, head, dirty}` in `manifest.jsonl` and saves `git diff base` to `r<N>/<id>.diff`. In `all -w`, the judge reads those diffs, not just the prose, and ends with a line `WINNER: <branch>`. The script then prints the merge command for that branch, for example:
+rw Claude agents commit their own work. Codex rw agents cannot, because their sandbox does not include the repository's git directory, so the orchestrator commits for them. After each rw agent the script:
+
+1. **Commits leftovers only on success.** If the agent exited 0 and left uncommitted changes, they are committed, but only if `HEAD` is still on the branch recorded in `worktrees.jsonl` and still descends from the recorded base. If you have no git identity configured, the commit uses `swarm <swarm@localhost>`. The committed paths are recorded as `autocommitted` in the manifest. A failed agent's changes are never committed.
+2. **Fails visibly.** If the branch check or the commit fails, the agent gets `rc=71` and its files are left as they are for you to inspect. A branch without its commit is never offered for merging.
+3. **Records the result.** `{id, branch, base, head, dirty}` goes to `manifest.jsonl`, and `git diff base` to `r<N>/<id>.diff`.
+
+In `all -w` the judge reads those diffs, not just the prose, and ends with a line `WINNER: <branch>` or `WINNER: NONE`. The script takes the last such line and checks it: the branch must belong to this run (`worktrees.jsonl`) and must not be dirty. All branches are listed for review; for a valid winner the script also prints one diff command, one merge command and the cleanup for the rest, for example:
 
 ```bash
-git merge swarm/20260925-143012/a2
+git diff <base>..swarm/20260925-143012/a2
+git merge -- swarm/20260925-143012/a2
+swarm clean .swarm/20260925-143012 --discard swarm/20260925-143012/a1
 ```
 
-Nothing is ever merged automatically. Worktrees are created from `HEAD`, so uncommitted changes in your checkout are not visible to agents; `-w` warns when the tree is dirty.
+The losing branches are unmerged by design, so `clean` deletes them only when you name them after `--discard`. Nothing is ever merged automatically. Worktrees are created from `HEAD`, so uncommitted changes in your checkout are not visible to agents; `-w` warns when the tree is dirty.
 
 ## The message board
 
@@ -204,15 +239,16 @@ Inside a worker, `post` ignores the `DIR` and `FROM` arguments and writes to the
 
 | | Read-only (default) | Read-write (`-w`, worktree tasks) |
 |---|---|---|
-| Claude Code | `--permission-mode dontAsk`, allowlist: `Read Grep Glob WebSearch WebFetch`, `git log/show/diff/status/blame`, the board commands | `--permission-mode acceptEdits`, allowlist: `Read Grep Glob Edit Write`, `git status/diff/add/commit`, the board commands, plus `SWARM_RW_ALLOW` |
-| Codex | `workspace-write` rooted at the agent's own `a/<id>/` dir: the project is readable, only its outbox is writable | `workspace-write` on the agent's worktree + its own `a/<id>/` |
+| Claude Code | `--permission-mode dontAsk`, allowlist: `Read Grep Glob WebSearch WebFetch`, `git log/show/diff/status/blame`, the board commands, plus `SWARM_RO_ALLOW` | `--permission-mode acceptEdits`, allowlist: `Read Grep Glob Edit Write`, `git status/diff/add/commit`, the board commands, plus `SWARM_RW_ALLOW` |
+| Codex | `workspace-write` rooted at the agent's own `a/<id>/` dir: the project is readable, only its outbox is writable | `workspace-write` on the agent's worktree + its own `a/<id>/`; no access to the git directory, the orchestrator commits |
 | Where it writes | Nothing in your project | Its own git worktree and branch |
 
-- **Default is read-only.** Agents can read your code and the web, run read-only git commands and talk on the board. `rg` is deliberately not allowed (`rg --pre` executes commands); Grep covers search.
+- **Default is read-only.** Agents can read your code and the web, run read-only git commands and talk on the board. `rg` is deliberately not allowed (`rg --pre` executes commands); Grep covers search. To let ro Claude agents run tests or a reproducer, allow those commands with `SWARM_RO_ALLOW`.
 - **rw is scoped, not unlimited.** rw Claude agents can edit files and commit, nothing else. Add tools per project with `SWARM_RW_ALLOW`, e.g. `SWARM_RW_ALLOW=$'Bash(uv run pytest:*)\nBash(npm test:*)'`.
-- **`SWARM_UNSAFE_RW=1` removes all checks.** Claude then runs with `--dangerously-skip-permissions`, which gives the agent the same access to your machine as your user account; a worktree only limits where the changes land, not what the process can reach. The script prints a warning before starting. Use it only in a disposable environment.
+- **`SWARM_UNSAFE_RW=1` removes all checks.** Claude then runs with `--dangerously-skip-permissions`, which gives the agent the same access to your machine as your user account; a worktree only limits where the changes land, not what the process can reach. The script prints a warning to stderr before starting. Use it only in a disposable environment.
+- **Codex rw cannot reach the git directory.** Codex rw workers used to get `--add-dir` on the repository's git directory so they could commit, which could also make `.git/hooks` and `.git/config` writable from inside the sandbox. That access is removed; the orchestrator commits for Codex instead.
 - **Worktree and permissions are separate.** A worktree decides *where* an agent writes; `mode` decides *whether* it may write. Contradictory combinations are rejected instead of silently escalated.
-- **Workers do not inherit your config.** Claude and Codex workers start without your user-level settings (Codex with `--ignore-user-config`). Your hooks, output style, MCP servers and global instructions do not leak into answers (or cost). `SWARM_INHERIT_CONFIG=1` turns this off.
+- **Workers follow the project's config, not your user config.** Claude workers load only project and local settings (`--setting-sources project,local`) and no MCP servers (`--strict-mcp-config`), so the project `CLAUDE.md` applies while your user hooks, output style and MCP servers do not. Codex workers run with `--ignore-user-config`, which skips `~/.codex/config.toml` and nothing else; for example, Codex still reads `AGENTS.md` files as usual. `SWARM_INHERIT_CONFIG=1` turns this off.
 - **Ctrl-C stops everything.** Interrupting `swarm.sh` kills the whole process tree of every running worker; timeouts escalate to `SIGKILL` after 30 seconds. No orphaned sessions keep billing.
 - **Nesting guard.** Workers run with `SWARM_DEPTH=1` and `swarm.sh` refuses to start inside a worker, so a swarm cannot spawn swarms recursively.
 
@@ -226,7 +262,7 @@ A run costs about **N × R + 1** agent sessions: N agents, R rounds, one judge. 
 | `-m "claude-opus-5-5 claude-sonnet-5 gpt-5.5"` | 7 |
 | `-m all` with 11 models | 23 |
 
-`swarm status DIR` shows cost and token usage per agent and a total (`unknown` where the engine did not report it). To keep it cheap: stay with the default roster, use `-r 1` when you only want independent opinions, pick a cheaper judge with `-S`, and use `-m all` only where a second opinion is worth real money.
+`swarm status DIR` shows cost per agent and a total. Codex reports no USD figure, so for Codex agents it shows input/output tokens instead; `unknown` means the engine reported nothing. To keep it cheap: stay with the default roster, use `-r 1` when you only want independent opinions, pick a cheaper judge with `-S`, and use `-m all` only where a second opinion is worth real money.
 
 ## How this repo was built
 
@@ -236,6 +272,8 @@ The skill was improved by its own swarm. Eleven models (4 Claude via Claude Code
 - **Should `worktree:true` imply `rw`?** One side said yes, the other called it an escalation of an explicit `ro`. The judge found both right: infer `rw` when `mode` is not set, reject an explicit `ro` with a worktree.
 - **Cleanup on Ctrl-C with `trap 'kill -- -$$'`.** Rejected: GNU `timeout` moves its child into a separate process group, so the signal never reaches the model CLI. The fix walks the process tree instead.
 - **Stop early when agents agree.** Rejected, and withdrawn by the agent who proposed it. The run itself was the counterexample: a correlated error looks the same as agreement.
+
+The second iteration repeated the exercise on v0.3.0: another 11-model review, whose verdict became the v0.4.0 plan. This time the agents backed their claims with stub reproducers (fake `claude` / `codex` binaries, as in `tests/test.sh`) and found real regressions: rw auto-commit also committed the work of failed workers, and onto whatever branch `HEAD` happened to be on; `--safe-mode` silently kept the project `CLAUDE.md` away from workers; the `SWARM_UNSAFE_RW` warning promised by the docs was never printed; and the installer's `--prefix` had no guard against deleting an arbitrary directory. One claim raised as P0 was refuted: "the judge and critique rounds cannot see the answers because they only get file paths". The judge, itself given only paths, checked this directly and read the answer files through `--add-dir`.
 
 ## Comparison
 
@@ -266,20 +304,21 @@ No. The judge is instructed to weigh evidence over head count and to list what s
 See `anon.map` in the run directory.
 
 **One agent failed. Is the run lost?**
-An agent that exits non-zero or returns an empty answer counts as failed. By default every agent must succeed; with `-q N` the run continues as long as N answers are valid, and `final.md` is marked `PARTIAL` with the list of failed agents. If only the judge failed, `swarm judge DIR` reruns it without paying for the rounds again.
+An agent that exits non-zero or returns an empty answer counts as failed, and so does a round 2+ answer without a `FINAL ANSWER` section. By default every agent must succeed; with `-q N` the run continues as long as N answers are valid, and `final.md` is marked `PARTIAL` with the list of failed agents. A failed agent is not relaunched in later rounds, and the judge gets a ledger of who failed in which round. If only the judge failed, `swarm judge DIR` reruns it without paying for the rounds again; if the run was interrupted, `swarm resume DIR` continues it and reruns only the agents that did not finish.
 
 **An agent hung.**
-Each agent is stopped after `-t` seconds (default 1800); its `.rc` file holds the exit code (`124` = timeout) and `.log` holds the engine log.
+Each agent is stopped after `-t` seconds (default 1800); its `.rc` file holds the exit code (`124` = timeout, `71` = rw commit or branch check failed) and `.log` holds the engine log.
 
 **How do I test without burning tokens?**
 Point `SWARM_CLAUDE_BIN` / `SWARM_CODEX_BIN` at stub scripts, as `tests/test.sh` does.
 
 ## Roadmap
 
-- `-R` resume for interrupted runs (checked against a hash of the task and roster).
 - Structured output (`-J schema.json`) for agents and judge.
-- opencode engine (third harness, more providers).
-- MCP server mode: expose `all` / `run` / board as MCP tools so any MCP client can start and watch a swarm.
+- opencode engine (third harness, more providers), once engines sit behind one adapter with stub tests.
+- An optional one-round baseline to measure whether critique rounds actually improve answers.
+
+Deliberately not planned: automatic merging of the `WINNER`, stopping early on agreement, a built-in USD price table, and an MCP server or daemon (`-d` + `wait` covers driving a run from another agent).
 
 ## More
 
