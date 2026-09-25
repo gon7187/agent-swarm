@@ -1,6 +1,6 @@
 ---
 name: swarm
-description: Run cooperating Claude Code and Codex workers with independent answers, critique rounds, a message board and a judge. Use for independent subtasks or explicit multi-model reviews; skip trivial single-step work. Workers must not launch swarms or subagents.
+description: Run cooperating Claude Code and Codex workers with independent answers, critique rounds, a message board and a judge. Use for tasks with 2+ independent parts, anything worth a second opinion (architecture, hard bugs, reviews, research, estimates), or when the user asks for a swarm / all models / "рой" / "все модели"; skip trivial single-step work. Workers must not launch swarms or subagents.
 ---
 
 # Swarm 0.3.0
@@ -92,7 +92,8 @@ never an invented zero. Codex usage sums completed turns. The board merges
 `a/*/outbox.jsonl`. `status` includes costs and message count.
 Writable workers produce `.diff` and `manifest.jsonl` (branch, base/head, dirty
 state). Untracked files appear in dirty state, not Git diffs. Workers must stage
-specific files and commit themselves. The judge reviews diffs and ends with
+specific files and commit themselves; leftovers in a swarm-owned worktree are
+auto-committed by the orchestrator (Codex keeps `.git` read-only in its sandbox). The judge reviews diffs and ends with
 `WINNER: <branch>`; the script prints merge commands but never merges.
 
 Worktrees start at HEAD, excluding uncommitted source changes (warning emitted),
