@@ -9,6 +9,8 @@ unset SWARM_AGENT_DIR SWARM_INHERIT_CONFIG SWARM_UNSAFE_RW SWARM_RW_ALLOW SWARM_
 export SWARM_CLAUDE_BIN="$T/claude" SWARM_CODEX_BIN="$T/codex"
 export SWARM_CLAUDE_MODELS='sonnet claude-other' SWARM_CODEX_MODELS='gpt-test gpt-other'
 export TEST_ROOT=$T
+FIXTURES=$(realpath "$(dirname "$0")/fixtures")
+export FIXTURES
 cat > "$T/harness" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -18,6 +20,11 @@ if [[ ${1:-} == debug ]]; then
   echo '[{"slug":"gpt-test","visibility":"list","supported_reasoning_efforts":[{"effort":"low"},{"effort":"high"}]},{"slug":"hidden","visibility":"hide"}]'; exit
 fi
 printf '%s\n' "$@" > "$SWARM_AGENT_DIR/argv"
+if [[ -d $TEST_ROOT/conc ]]; then # record peak concurrency
+  mkdir "$TEST_ROOT/conc/$$"
+  trap 'rmdir "$TEST_ROOT/conc/$$"' EXIT
+  find "$TEST_ROOT/conc" -mindepth 1 -maxdepth 1 | wc -l >> "$TEST_ROOT/conc.max"
+fi
 out='' prompt='' model='' root=''
 while (($#)); do
   case $1 in
@@ -38,6 +45,15 @@ eval "${post_cmd% \[target_agent_id\]}" >/dev/null
 # Ignore DIR and spoofed sender when bound to a worker outbox.
 "$TEST_ROOT/swarm" post "$TEST_ROOT/spoof" fake bound >/dev/null
 [[ $prompt != *SLOW* ]] || sleep 3
+[[ $prompt != *CONC* ]] || sleep 0.1
+[[ $prompt != *LAUNCHLOG* ]] || echo "$engine ${SWARM_AGENT_DIR##*/}" >> "$TEST_ROOT/launches"
+if [[ $engine == codex && ${SWARM_AGENT_DIR##*/} != judge ]]; then
+  if [[ $prompt == *RATE429* && ! -e $TEST_ROOT/rate-hit ]]; then
+    touch "$TEST_ROOT/rate-hit"; echo '{"type":"error","message":"429 Too Many Requests"}'; exit 1
+  fi
+  [[ $prompt != *EXHAUST* ]] || { cat "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
+  [[ $prompt != *RLITEM* ]] || { head -n 4 "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
+fi
 if [[ $prompt == *TREE* || ( ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-tree ) ]]; then
   bash -c 'trap "" TERM; echo "$BASHPID" > "$TEST_ROOT/descendant"; while :; do sleep 1; done' &
   wait
@@ -56,6 +72,7 @@ answer="FINAL ANSWER (complete, standalone): harness answer from ${SWARM_AGENT_D
 [[ $prompt != *NOFINAL* ]] || answer='incomplete answer'
 [[ $prompt != *MDHEADING* ]] || answer=$'Analysis first.\n\n## **FINAL ANSWER**\nharness answer'
 [[ $prompt != *INLINEFINAL* ]] || answer='this merely mentions a FINAL ANSWER inline'
+[[ $prompt != *RLTEXT* ]] || answer='The upstream API hit a rate limit (429 Too Many Requests); usage limit notes.'
 if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
   run_dir=${SWARM_AGENT_DIR%/a/judge}
   if [[ -f $run_dir/worktrees.jsonl ]]; then
@@ -68,6 +85,7 @@ fi
 # Loop judge: each call consumes the next judge-script line "VERDICT SCORE BEST [INCUMBENT_SCORE] [BAD|DEFECTS|STRAT|MERGE|TRAIL]".
 if [[ ${SWARM_AGENT_DIR##*/} == judge && $prompt == *'You are the loop judge'* ]]; then
   n=$(( $(cat "$TEST_ROOT/judge-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$TEST_ROOT/judge-n"
+  [[ $prompt != *DIRTYWIN* ]] || echo late > "$(jq -r .path "${SWARM_AGENT_DIR%/a/judge}/worktrees.jsonl" | tail -n 1)/late"
   v='' s='' b='' i='' x=''
   read -r v s b i x < <(sed -n "${n}p" "$TEST_ROOT/judge-script") || true
   if [[ $v == BAD ]]; then answer='no decision here'
@@ -85,6 +103,7 @@ if [[ $prompt == *EMPTY* || ( $prompt == *MIXED* && $model == gpt-test ) ]]; the
   if [[ $engine == claude ]]; then echo '{"result":"","total_cost_usd":0.1}'; else : > "$out"; fi
 elif [[ $engine == claude ]]; then
   if [[ $prompt == *APIERROR* ]]; then echo '{"result":"error","is_error":true}'
+  elif [[ $prompt == *CUSTOMRL* && ${SWARM_AGENT_DIR##*/} != judge ]]; then echo '{"result":"custom-throttle hit","is_error":true}'
   else jq -cn --arg answer "$answer" '{result:$answer,is_error:false,total_cost_usd:0.1,usage:{input_tokens:10}}'; fi
 else
   printf '%s\n' "$answer" > "$out"
@@ -102,7 +121,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 reject() { if "$@" >"$T/reject.log" 2>&1; then fail "accepted: $*"; fi; }
 has() { local contents; contents=$(cat "$1"); grep -Fq -- "$2" <<< "$contents" || fail "missing $2 in $1"; }
 not_has() { local contents; contents=$(cat "$1"); if grep -Fq -- "$2" <<< "$contents"; then fail "unexpected $2 in $1"; fi; }
-[[ $("$S" version) == 0.4.0 ]] || fail version
+[[ $("$S" version) == 0.5.0 ]] || fail version
 has <("$S" --help) 'watch DIR'
 [[ $("$S" roster | wc -l) == 4 ]] || fail roster
 [[ $(env -u SWARM_CODEX_MODELS "$S" roster | tail -1) == gpt-test ]] || fail discovery
@@ -507,4 +526,74 @@ timeout --preserve-status -s INT -k 5 1 "$S" loop -m sonnet -S claude-other -o "
 child=$(cat "$T/descendant")
 [[ ! -d /proc/$child || $(ps -o stat= -p "$child") == Z* ]] || fail loop-interrupt-orphan
 [[ $(cat "$T/loop-int/it1/a1.rc") == 130 && $(jq -r .stop_reason "$T/loop-int/result.json") == interrupted ]] || fail loop-interrupt-state
+# --- v0.5 P1: preview, confirmation gate and mass quorum.
+rc_is 2 "$S" all -r 1 -m 'sonnet@low*21' -S claude-other -o "$T/big" hello
+[[ ! -d $T/big ]] || fail confirm-created-dir
+has "$T/rc.log" 'rerun with -y'
+has "$T/rc.log" 'quorum 13'
+grep -Eq 'sonnet@low +claude +21' "$T/rc.log" || fail preview-table
+"$S" mass -m 'sonnet*13' -S claude-other -o "$T/mass" hello 2> "$T/mass.err" >/dev/null
+[[ $(jq .quorum "$T/mass/run.json") == 8 && $(jq .rounds "$T/mass/run.json") == 1 && ! -d $T/mass/r2 ]] || fail mass-alias
+has "$T/mass.err" '13 agents × 1 rounds + judge = 14 sessions; quorum 8'
+# 100 agents never exceed -j.
+mkdir "$T/conc"
+"$S" all -y -r 1 -j 3 -m 'sonnet*100' -S claude-other -o "$T/hundred" CONC >/dev/null 2>&1
+rm -rf "$T/conc"
+[[ $(sort -n "$T/conc.max" | tail -n 1) -le 3 && $(wc -l < "$T/conc.max") -ge 100 ]] || fail "concurrency peak $(sort -n "$T/conc.max" | tail -n 1)"
+[[ $(cat "$T/hundred"/r1/*.rc | sort -u) == 0 ]] || fail hundred-agents
+# Rate limits: transient errors are retried by the orchestrator and attempts are kept.
+mkdir "$T/noshuf"; printf '#!/bin/sh\nexec cat\n' > "$T/noshuf/shuf"; chmod +x "$T/noshuf/shuf"
+rm -f "$T/rate-hit"
+SWARM_BACKOFF_BASE=0 "$S" all -r 1 -m 'gpt-test sonnet' -S claude-other -o "$T/rate" RATE429 >/dev/null 2>&1
+codex_id=$(awk '$2 == "gpt-test" {print $1}' "$T/rate/anon.map")
+[[ $(cat "$T/rate/r1/$codex_id.attempt1.rc") == 76 && $(cat "$T/rate/r1/$codex_id.rc") == 0 ]] || fail rate-retry
+has "$T/rate/failures.jsonl" '"event":"retry"'
+[[ ! -f $T/rate/PARTIAL ]] || fail retry-marked-partial
+# While Codex cools down, Claude jobs keep launching.
+rm -f "$T/rate-hit" "$T/launches"
+PATH="$T/noshuf:$PATH" SWARM_BACKOFF_BASE=1 "$S" all -r 1 -j 1 -m 'gpt-test*2 sonnet*2' -S claude-other -o "$T/cool" 'RATE429 LAUNCHLOG' >/dev/null 2>&1
+[[ $(grep -n '^claude a3' "$T/launches" | cut -d: -f1) -lt $(grep -n '^codex a2' "$T/launches" | cut -d: -f1) ]] || fail "claude waited for codex cooldown: $(tr '\n' ' ' < "$T/launches")"
+[[ $(grep -c '^codex a1' "$T/launches") == 2 ]] || fail cooldown-retry
+# Exhausted quota (real Codex --json log): rc 77, engine dead, queued agents skipped, quorum honoured.
+PATH="$T/noshuf:$PATH" "$S" all -r 1 -j 1 -q 1 -m 'gpt-test*2 sonnet' -S claude-other -o "$T/exhaust" EXHAUST >/dev/null 2>&1
+[[ $(cat "$T/exhaust/r1/a1.rc") == 77 && $(cat "$T/exhaust/r1/a2.rc") == 77 && $(cat "$T/exhaust/r1/a3.rc") == 0 ]] || fail exhausted-codes
+[[ ! -e $T/exhaust/a/a2/argv && -s $T/exhaust/.backoff/codex.dead ]] || fail exhausted-skip
+has "$T/exhaust/failures.jsonl" '"event":"skip"'
+[[ $(jq .partial "$T/exhaust/result.json") == true && $(jq .rc "$T/exhaust/result.json") == 0 ]] || fail exhausted-partial
+# Only error events count: the same log without them (its tool output mentions 429) stays rc 1.
+reject "$S" all -r 1 -m gpt-test -S claude-other -o "$T/rlitem" RLITEM
+[[ $(cat "$T/rlitem/r1/a1.rc") == 1 ]] || fail rate-from-tool-output
+# A successful answer that talks about rate limits is not classified.
+"$S" all -r 1 -m 'sonnet gpt-test' -S claude-other -o "$T/rltext" RLTEXT >/dev/null 2>&1
+[[ $(cat "$T/rltext/r1"/*.rc | sort -u) == 0 ]] || fail rate-from-answer
+# Overridable pattern; after three requeues the failure stands.
+reject env SWARM_BACKOFF_BASE=0 SWARM_RATELIMIT_RE=custom-throttle "$S" all -r 1 -m sonnet -S claude-other -o "$T/customrl" CUSTOMRL
+[[ $(cat "$T/customrl/r1/a1.rc") == 76 && -f $T/customrl/r1/a1.attempt3.rc && ! -f $T/customrl/r1/a1.attempt4.rc ]] || fail custom-ratelimit
+# -M: the judge may write merged text, but never STOP in that iteration; off by default.
+script 'CONTINUE 80 MERGED 0 MERGE' 'STOP 90 INCUMBENT 90'
+loop -M -o "$T/loop-merge" hello >/dev/null 2>&1
+[[ $(cat "$T/loop-merge/final.md") == 'merged text' && -s $T/loop-merge/it1/merged.md ]] || fail loop-merge
+script 'CONTINUE 80 MERGED 0 MERGE' 'CONTINUE 80 MERGED 0 MERGE'
+rc_is 65 loop -o "$T/loop-nomerge" hello
+has "$T/rc.log" 'MERGED is not enabled'
+script 'STOP 90 MERGED 0 MERGE' 'STOP 90 MERGED 0 MERGE'
+rc_is 65 loop -M -o "$T/loop-stopmerge" hello
+has "$T/rc.log" 'no STOP in the iteration that picks MERGED'
+rc_is 2 loop -M -w -o "$T/loop-mw" hello
+# rw loop: iteration 2 branches from the iteration-1 winner; losers' worktrees go, branches stay.
+script 'CONTINUE 70 a1 0' 'STOP 90 a2 70'
+"$S" loop -w -m 'gpt-test*2' -S claude-other -o "$T/loop-rw" COMMIT > "$T/loop-rw.out" 2>/dev/null
+[[ $(jq -r 'select(.branch == "swarm/loop-rw/i2/a1") | .base' "$T/loop-rw/worktrees.jsonl") == $(git rev-parse swarm/loop-rw/i1/a1) ]] || fail rw-loop-base
+[[ ! -d $(jq -r 'select(.branch == "swarm/loop-rw/i1/a2") | .path' "$T/loop-rw/worktrees.jsonl") ]] || fail rw-loser-worktree
+git show-ref --verify --quiet refs/heads/swarm/loop-rw/i1/a2 || fail rw-loser-branch
+[[ $(jq -r .winner "$T/loop-rw/result.json") == swarm/loop-rw/i2/a2 ]] || fail rw-loop-winner
+has "$T/loop-rw.out" 'git merge -- swarm/loop-rw/i2/a2'
+has "$T/loop-rw/it1/judge.prompt" "$T/loop-rw/it1/a1.diff"
+git -c user.name=Test -c user.email=test@example.com merge -q --ff-only swarm/loop-rw/i2/a2
+"$S" clean "$T/loop-rw" >/dev/null
+[[ -z $(git branch --list 'swarm/loop-rw/*') ]] || fail rw-loop-clean
+# A dirty winner is never accepted.
+script 'CONTINUE 70 a1 0' 'CONTINUE 70 a1 0'
+rc_is 65 "$S" loop -w -m sonnet -S claude-other -o "$T/loop-dirty" DIRTYWIN
+has "$T/rc.log" 'dirty or switched worktree'
 printf 'All tests passed.\n'

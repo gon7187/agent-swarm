@@ -3,6 +3,7 @@
 # Usage:
 #   swarm.sh roster | version | --help
 #   swarm.sh all [opts] "task"            independent round, critique, judge
+#   swarm.sh mass [opts] "task"           alias for all -r 1
 #   swarm.sh loop -S judge [opts] "task"  improve a best answer until the judge says STOP
 #   swarm.sh run [opts] tasks.jsonl       {id,prompt,model?,mode?,worktree?,shared?,dir?,engine?}
 #   swarm.sh resume DIR                   retry unfinished all/loop run
@@ -17,8 +18,11 @@
 #          -r rounds (2), -m "specs" (one per harness; "all" for full roster),
 #          -S judge spec (no *count), -w (rw isolated worktrees), -W (open watch terminal),
 #          -d (detach), -y (skip large-run confirmation)
-# Loop:    -K stalls before escalation (3), -I max iterations, -B max sessions (exit 4)
+# Loop:    -K stalls before escalation (3), -I max iterations, -B max sessions (exit 4),
+#          -M judge may merge text candidates (not with -w)
 # Environment: SWARM_{CLAUDE,CODEX}_{BIN,MODELS}, SWARM_INHERIT_CONFIG=1,
+#   SWARM_MASS_AT (12), SWARM_CONFIRM_OVER (20), SWARM_BACKOFF_BASE (30),
+#   SWARM_RATELIMIT_RE / SWARM_EXHAUSTED_RE (ERE, case-insensitive),
 #   SWARM_UNSAFE_RW=1 (Claude host-wide bypass), SWARM_RW_ALLOW / SWARM_RO_ALLOW (one tool per line),
 #   SWARM_TERMINAL (executable, default xdg-terminal-exec), SWARM_DEPTH.
 set -euo pipefail
@@ -54,6 +58,51 @@ check_effort() {
   elif [[ " $efforts " != *" $2 "* ]]; then die "unsupported effort for $1: $2 (supported: $efforts)"; fi
 }
 rc_files() { rcs=("$1"/*.rc "$1"/r*/*.rc "$1"/it*/*.rc "$1"/j/*/*.rc); }
+engine_of() { if is_claude "$1"; then echo claude; else echo codex; fi; }
+# Plan table (stderr): one row per model@effort with its engine and count.
+preview() {
+  local i key
+  local -A n=()
+  local -a order=()
+  for i in "${!ms[@]}"; do
+    key=${ms[$i]}${es[$i]:+@${es[$i]}}
+    [[ ${n[$key]+x} ]] || order+=("$key")
+    n[$key]=$((${n[$key]:-0} + 1))
+  done
+  {
+    printf 'swarm: %-32s %-7s %s\n' SPEC ENGINE COUNT
+    for key in "${order[@]}"; do printf 'swarm: %-32s %-7s %s\n' "$key" "$(engine_of "${key%@*}")" "${n[$key]}"; done
+    printf 'swarm: judge %s%s\n' "$synth" "${synth_effort:+@$synth_effort}"
+  } >&2
+}
+# Classify a failed call from error events and stderr only, never from answer text.
+limit_kind() {
+  local text
+  if [[ $1 == claude ]]; then text=$(jq -r 'select(.is_error? == true) | .result // empty | tostring' "$2" 2>/dev/null || true)
+  else text=$(jq -Rr 'fromjson? | select(.type? == "error" or .type? == "turn.failed") | .message // .error.message // empty | tostring' "$2" 2>/dev/null || true); fi
+  text+=$'\n'$(cat "$3" 2>/dev/null || true)
+  if grep -Eiq -- "${SWARM_EXHAUSTED_RE:-usage.?limit|quota|insufficient.?credit}" <<< "$text"; then echo exhausted
+  elif grep -Eiq -- "${SWARM_RATELIMIT_RE:-rate.?limit|\b(429|529)\b|too many requests|overloaded}" <<< "$text"; then echo transient; fi
+}
+# .backoff/<engine> holds "<retry-after epoch> <consecutive hits>"; delay min(900, BASE*2^n) + jitter.
+backoff() {
+  local f=$dir/.backoff/$1 until=0 n=0 base=${SWARM_BACKOFF_BASE:-30} delay
+  mkdir -p "$dir/.backoff"
+  [[ ! -f $f ]] || read -r until n < "$f" || true
+  ((n <= 10)) || n=10
+  delay=$((base * (1 << n))); ((delay <= 900)) || delay=900
+  ((base == 0)) || delay=$((delay + RANDOM % (base + 1)))
+  echo "$(($(date +%s) + delay)) $((n + 1))" > "$f"
+}
+cooling() {
+  local until=0 n
+  [[ -f $dir/.backoff/$1 ]] && read -r until n < "$dir/.backoff/$1"
+  ((until > $(date +%s)))
+}
+log_event() {
+  jq -cn --arg round "${r:-1}" --arg file "$2" --arg rc "$3" --arg event "$1" --arg note "$4" \
+    '{round:$round,file:$file,rc:$rc,event:$event,note:$note}' >> "$dir/failures.jsonl"
+}
 roster() {
   if command -v "$CLAUDE" >/dev/null; then
     tr ' \t' '\n' <<< "$CLAUDE_MODELS" | sed '/^$/d'
@@ -191,9 +240,16 @@ clean() {
   for f in "${rcs[@]}"; do
     [[ $(cat "$f") != running ]] || die "agent still running: $f"
   done
+  # Once a loop's winner is merged, its superseded candidate branches are judged losers.
+  local loop_winner=''
+  if [[ $(jq -r '.kind // ""' "$dir/run.json" 2>/dev/null) == loop ]]; then
+    loop_winner=$(jq -r '.winner // ""' "$dir/result.json" 2>/dev/null || true)
+    [[ -n $loop_winner ]] && git -C "$(head -n 1 "$dir/worktrees.jsonl" | jq -r .repo)" merge-base --is-ancestor "$loop_winner" HEAD 2>/dev/null || loop_winner=''
+  fi
   while IFS= read -r row; do
     repo=$(jq -r .repo <<< "$row"); path=$(jq -r .path <<< "$row"); branch=$(jq -r .branch <<< "$row")
     discard=0
+    [[ -z $loop_winner ]] || discard=1
     for f in "${discarded[@]}"; do [[ $f != "$branch" ]] || discard=1; done
     # Explicit discard only waives ancestry, never dirty-worktree protection.
     if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -296,6 +352,12 @@ $prompt"
       "$log" > "${md%.md}.usage" 2>/dev/null || echo '{"cost":null,"usage":null}' > "${md%.md}.usage"
   fi
   [[ $rc != 0 || ( -s $md && $(LC_ALL=C tr -d '[:space:]' < "$md") != '' ) ]] || rc=65
+  if [[ $rc != 0 ]]; then
+    case $(limit_kind "$engine" "$log" "${md%.md}.stderr") in
+      exhausted) rc=77; mkdir -p "$dir/.backoff"; printf '%s\n' "$id" >> "$dir/.backoff/$engine.dead" ;;
+      transient) rc=76; backoff "$engine" ;;
+    esac
+  else rm -f "$dir/.backoff/$engine"; fi
   if [[ $mode == rw && -n $base ]]; then
     if ((owned && rc == 0)); then
       if [[ $(git -C "$root" symbolic-ref --short HEAD) != "$expected" ]] ||
@@ -320,18 +382,19 @@ $prompt"
   echo "$rc" > "${md%.md}.rc"
   return "$rc"
 }
+# worktree ID SOURCE [BASE_REF [TAG]]: branch swarm/<run>/[TAG/]ID at .swarm/wt/<run>-[TAG-]ID
 worktree() {
-  local id=$1 source=$2 repo wt branch
+  local id=$1 source=$2 ref=${3:-HEAD} tag=${4:-} repo wt branch
   repo=$(git -C "$source" rev-parse --show-toplevel) || die 'worktree needs a git repo'
   local exclude
   exclude=$(git -C "$repo" rev-parse --path-format=absolute --git-path info/exclude)
   mkdir -p "$(dirname "$exclude")"
   grep -Fxq '.swarm/' "$exclude" 2>/dev/null || printf '\n.swarm/\n' >> "$exclude"
-  [[ -z $(git -C "$source" status --porcelain) ]] || echo 'swarm: warning: worktree starts at HEAD; source has uncommitted changes' >&2
-  branch="swarm/$(basename "$dir")/$id"
+  [[ $ref != HEAD || -z $(git -C "$source" status --porcelain) ]] || echo 'swarm: warning: worktree starts at HEAD; source has uncommitted changes' >&2
+  branch="swarm/$(basename "$dir")/${tag:+$tag/}$id"
   git check-ref-format --branch "$branch" >/dev/null || die "invalid worktree branch: $branch"
-  wt="$repo/.swarm/wt/$(basename "$dir")-$id"
-  git -C "$repo" worktree add -q -b "$branch" "$wt" HEAD >&2
+  wt="$repo/.swarm/wt/$(basename "$dir")-${tag:+$tag-}$id"
+  git -C "$repo" worktree add -q -b "$branch" "$wt" "$ref" >&2
   jq -cn --arg repo "$repo" --arg path "$wt" --arg branch "$branch" --arg base "$(git -C "$wt" rev-parse HEAD)" \
     '{repo:$repo,path:$path,branch:$branch,base:$base}' >> "$dir/worktrees.jsonl"
   printf '%s\n' "$wt"
@@ -339,6 +402,40 @@ worktree() {
 # A final-answer heading at line start, any Markdown decoration: "## FINAL ANSWER", "**FINAL ANSWER:**".
 has_final() { grep -Eq '^[[:space:]]*(#{1,6}[[:space:]]*)?(\*\*|__)?[[:space:]]*FINAL ANSWER\b' "$1"; }
 throttle() { while (($(jobs -rp | wc -l) >= jobs_max)); do wait -n || true; done; }
+# Run ids into answer dir $1 with prompt $p. Transient limits (rc 76) are requeued by the
+# orchestrator up to 3 times; engines cooling down are deferred while others keep launching;
+# agents of an exhausted engine are skipped with rc 77.
+run_pass() {
+  local rd=$1 id f eng pass
+  shift
+  local -a todo=("$@") later launched retry
+  for ((pass=0; ; pass++)); do
+    launched=()
+    while ((${#todo[@]})); do
+      later=()
+      for id in "${todo[@]}"; do
+        f=$rd/$id.md
+        throttle
+        eng=$(engine_of "${agent_models[$id]}")
+        [[ ! -e ${f%.md}.rc ]] || stash_attempt "${f%.md}"
+        if [[ -s $dir/.backoff/$eng.dead ]]; then
+          : > "$f"; echo 77 > "${f%.md}.rc"; log_event skip "$f" 77 "$eng usage exhausted"; continue
+        fi
+        if cooling "$eng"; then later+=("$id"); continue; fi
+        launched+=("$id")
+        run_one "$id" "${agent_models[$id]}" "$mode" "${wds[$id]}" "$p" "$f" '' "${agent_efforts[$id]}" &
+      done
+      todo=("${later[@]}")
+      ((${#todo[@]} == 0)) || sleep 1
+    done
+    wait
+    retry=()
+    for id in "${launched[@]}"; do [[ $(cat "$rd/$id.rc") != 76 ]] || retry+=("$id"); done
+    ((${#retry[@]} && pass < 3)) || break
+    for id in "${retry[@]}"; do log_event retry "$rd/$id.md" 76 "transient limit; pass $((pass + 1))"; done
+    todo=("${retry[@]}")
+  done
+}
 collect_results() {
   local f
   ok=() bad=()
@@ -408,6 +505,8 @@ branches() {
   [[ -n ${winner:-} ]] || return 0
   local base
   base=$(jq -r --arg b "$winner" 'select(.branch == $b) | .base' "$dir/worktrees.jsonl")
+  # A loop winner stacks on earlier bests: show the whole change since the run started.
+  [[ ${kind:-} != loop ]] || base=$(head -n 1 "$dir/worktrees.jsonl" | jq -r .base)
   printf 'git diff %q\ngit merge -- %q\n' "$base..$winner" "$winner"
 }
 # shellcheck disable=SC2317,SC2329 # Called by EXIT trap.
@@ -466,16 +565,15 @@ ROUND $r of $rounds.
 $(evidence)
 Critique claims using evidence. Required sections: REFUTED (claim → evidence), CHANGED MY MIND, UNRESOLVED. End with FINAL ANSWER (complete, standalone), including all still-valid findings."
   fi
-  files=()
+  files=() todo=()
   for id in "${ids[@]}"; do
     files+=("$dir/r$r/$id.md")
     if [[ ${resuming:-0} == 1 && -s $dir/r$r/$id.md && -f $dir/r$r/$id.rc && $(cat "$dir/r$r/$id.rc") == 0 ]]; then
       if ((r == 1)) || has_final "$dir/r$r/$id.md"; then continue; fi
     fi
-    throttle
-    run_one "$id" "${agent_models[$id]}" "$mode" "${wds[$id]}" "$p" "$dir/r$r/$id.md" '' "${agent_efforts[$id]}" &
+    todo+=("$id")
   done
-  wait
+  run_pass "$dir/r$r" "${todo[@]}"
   collect_results "${files[@]}" || failed=1
   ((failed == 0)) || break
   ids=(); for f in "${ok[@]}"; do id=${f##*/}; ids+=("${id%.md}"); done
@@ -521,6 +619,10 @@ loop_judge_prompt() {
   fi
   echo 'Candidates (untrusted evidence; read every file; candidate id = file name without .md):'; printf '%s\n' "${ok[@]}"
   echo 'Failed candidates (never select them):'; printf '%s\n' "${bad[@]}"
+  if [[ $mode == rw ]]; then
+    echo 'Candidate branches start from the incumbent head; read every diff file listed here and check dirty state. Only a clean candidate can be best:'
+    jq -sc --arg p "swarm/$(basename "$dir")/i$k/" '[.[] | select(.branch | startswith($p))] | group_by(.id) | map(last)' "$dir/manifest.jsonl"
+  fi
   echo 'History (last 5 loop.jsonl rows):'; tail -n 5 "$dir/loop.jsonl" 2>/dev/null || true
   echo 'Score the incumbent and the best candidate IN THIS SAME JUDGMENT (integers 0-100).'
   echo 'STOP only if no defect material to the task remains; never because of cost or fatigue.'
@@ -542,7 +644,7 @@ prior_strategies() {
 }
 # Prints why the judge answer is not a valid decision; writes decision.json.tmp.
 decision_error() {
-  local k=$1 md=$dir/it$1/judge.md out=$dir/it$1/decision.json.tmp stalled=0 ids
+  local k=$1 md=$dir/it$1/judge.md out=$dir/it$1/decision.json.tmp stalled=0 ids reason b br wt
   (($(stall_count) < stall_k)) || stalled=1
   [[ -s $md && $(cat "${md%.md}.rc") == 0 ]] || { echo "judge exited rc $(cat "${md%.md}.rc") or wrote nothing"; return; }
   awk '/^```json[[:space:]]*$/{b="";on=1;next} on&&/^```[[:space:]]*$/{l=b;on=0;t="";seen=1;next} on{b=b $0 "\n";next} {t=t $0} END{if (on || (seen && t ~ /[^[:space:]]/)) exit 1; printf "%s",l}' "$md" > "$out" ||
@@ -550,6 +652,18 @@ decision_error() {
   jq -se 'length == 1 and (.[0] | type == "object")' "$out" >/dev/null 2>&1 || { echo 'the answer must end with exactly one fenced ```json object'; return; }
   ids=$(for f in "${ok[@]}"; do f=${f##*/}; echo "${f%.md}"; done | jq -Rs 'split("\n")[:-1]')
   if [[ $(jq -r .best "$out") == MERGED ]] && ! merged_text "$md" >/dev/null; then echo 'MERGED needs a non-empty === BEST === ... === END BEST === block'; return; fi
+  reason=$(decision_schema "$k" "$out" "$ids" "$stalled")
+  if [[ -z $reason && $mode == rw && $(jq -r .best "$out") != INCUMBENT ]]; then
+    b=$(jq -r .best "$out"); br=$(loop_branch "$k" "$b")
+    wt=$(jq -r --arg b "$br" 'select(.branch == $b) | .path' "$dir/worktrees.jsonl")
+    if [[ -z $wt || $(git -C "$wt" symbolic-ref --short HEAD 2>/dev/null) != "$br" || -n $(git -C "$wt" status --porcelain) ]]; then
+      reason="best $b has a dirty or switched worktree; choose a clean candidate or INCUMBENT"
+    fi
+  fi
+  printf '%s' "$reason"
+}
+decision_schema() {
+  local k=$1 out=$2 ids=$3 stalled=$4
   jq -r --argjson k "$k" --argjson ids "$ids" --argjson stalled "$stalled" --argjson merge "$merge" --argjson prior "$(prior_strategies)" '
     def need(c; m): if (try c catch false) then empty else m end;
     [need(.verdict | IN("STOP","CONTINUE","PAUSE"); "verdict must be STOP, CONTINUE or PAUSE"),
@@ -590,7 +704,7 @@ DECISION FORMAT ERROR: $reason}" "$base.md" '' "$synth_effort" &
 }
 sha() { local h; h=$(sha256sum "$1"); echo "${h%% *}"; }
 commit_iteration() {
-  local k=$1 d=$dir/it$1 score inc best gain stalled osc=null bsha prev='' cost unknown tokens sessions
+  local k=$1 d=$dir/it$1 score inc best gain stalled osc=null bsha prev='' cost unknown tokens sessions bbr='' id br path
   local -a usages=("$d"/*.usage) rcs=("$d"/*.rc)
   read -r verdict score inc best < <(jq -r '[.verdict,.score,.incumbent_score,.best] | @tsv' "$d/decision.json.tmp")
   ((k > 1)) || inc=0
@@ -602,6 +716,12 @@ commit_iteration() {
     chmod a-w "$dir/best.md.tmp"; mv -f "$dir/best.md.tmp" "$dir/best.md"
   fi
   bsha=$(sha "$dir/best.md")
+  if [[ $mode == rw ]]; then
+    if [[ $best == INCUMBENT ]]; then
+      bbr=$(tail -n 1 "$dir/loop.jsonl" | jq -r '.best_branch // ""')
+    else bbr=$(loop_branch "$k" "$best"); fi
+    bsha=$(git -C "$PROJECT" rev-parse "$bbr^{tree}")
+  fi
   gain=$((score - inc)); stalled=false
   ((gain >= 1)) && [[ $best != INCUMBENT ]] || stalled=true
   if [[ $best != INCUMBENT && $bsha != "$prev" && -f $dir/loop.jsonl ]]; then
@@ -614,9 +734,20 @@ commit_iteration() {
   jq -cn --argjson it "$k" --arg verdict "$verdict" --argjson score "$score" --argjson inc "$inc" --argjson gain "$gain" \
     --arg best "$best" --arg sha "$bsha" --argjson stalled "$stalled" --argjson osc "$osc" --argjson sessions "$sessions" \
     --argjson cost "$cost" --argjson tokens "$tokens" --argjson unknown "$unknown" --arg ts "$(date -u +%FT%TZ)" \
+    --arg bbr "$bbr" --arg bhead "$( [[ -z $bbr ]] || git -C "$PROJECT" rev-parse "$bbr")" \
     '{it:$it,verdict:$verdict,score:$score,incumbent_score:$inc,gain:$gain,best:$best,best_sha:$sha,stalled:$stalled,osc:$osc,
-      sessions:$sessions,cost_usd:$cost,unknown_calls:$unknown,codex_tokens:$tokens,ts:$ts}' >> "$dir/loop.jsonl"
+      sessions:$sessions,cost_usd:$cost,unknown_calls:$unknown,codex_tokens:$tokens,ts:$ts}
+      + if $bbr == "" then {} else {best_branch:$bbr,best_head:$bhead} end' >> "$dir/loop.jsonl"
   mv "$d/decision.json.tmp" "$d/decision.json"
+  if [[ $mode == rw ]]; then # Losers' clean worktrees go; their branches stay for inspection.
+    for id in "${ids[@]}"; do
+      br=$(loop_branch "$k" "$id"); [[ $br != "$bbr" ]] || continue
+      path=$(jq -r --arg b "$br" 'select(.branch == $b) | .path' "$dir/worktrees.jsonl")
+      if [[ -d $path && $(git -C "$path" symbolic-ref --short HEAD) == "$br" && -z $(git -C "$path" status --porcelain) ]]; then
+        git -C "$PROJECT" worktree remove "$path" || true
+      fi
+    done
+  fi
   printf 'it%s: %s %s (%+d) best=%s $%.2f known%s Σ$%.2f%s\n' "$k" "$verdict" "$score" "$gain" "$best" "$cost" \
     "$( ((unknown == 0)) || printf ' (+%s unknown)' "$unknown")" "$(jq -s '[.[].cost_usd] | add' "$dir/loop.jsonl")" \
     "$( ((tokens == 0)) || awk -v t="$tokens" 'BEGIN{if (t >= 1e6) printf " codex %.1fM tok", t/1e6; else printf " codex %.1fk tok", t/1e3}')" >&2
@@ -624,7 +755,8 @@ commit_iteration() {
 finish_loop() {
   stop_reason=$2
   if [[ -f $dir/best.md ]]; then cp -f "$dir/best.md" "$dir/final.md.tmp"; mv -f "$dir/final.md.tmp" "$dir/final.md"; chmod u+w "$dir/final.md"; fi
-  status "$dir"
+  [[ $mode != rw || ! -s $dir/loop.jsonl ]] || winner=$(tail -n 1 "$dir/loop.jsonl" | jq -r '.best_branch // ""')
+  status "$dir"; branches
   echo "loop: $stop_reason after $(jq -s length "$dir/loop.jsonl" 2>/dev/null || echo 0) iterations" >&2
   [[ ! -s $dir/final.md ]] || echo "final: $dir/final.md"
   exit "$1"
@@ -640,15 +772,14 @@ loop_run() {
     mkdir -p "$dir/it$k"
     r=$k independent=1
     p=$(loop_prompt "$k")
-    files=()
+    files=() todo=()
     for id in "${ids[@]}"; do
       f=$dir/it$k/$id.md; files+=("$f")
       if [[ -s $f && -f ${f%.md}.rc && $(cat "${f%.md}.rc") == 0 ]] && { ((k == 1)) || has_final "$f"; }; then continue; fi
-      [[ ! -e ${f%.md}.rc ]] || stash_attempt "${f%.md}"
-      throttle
-      run_one "$id" "${agent_models[$id]}" "$mode" "${wds[$id]}" "$p" "$f" '' "${agent_efforts[$id]}" &
+      todo+=("$id")
     done
-    wait
+    [[ $mode != rw ]] || loop_worktrees "$k"
+    run_pass "$dir/it$k" "${todo[@]}"
     collect_results "${files[@]}" || finish_loop 1 quorum
     loop_judge "$k" || finish_loop 65 judge-failed
     commit_iteration "$k"
@@ -667,11 +798,24 @@ loop_reopen() {
   rm -f "$dir/best.md.tmp"
   if [[ -n ${b:-} ]]; then cp "$dir/$b" "$dir/best.md.tmp"; chmod a-w "$dir/best.md.tmp"; mv -f "$dir/best.md.tmp" "$dir/best.md"; else rm -f "$dir/best.md"; fi
 }
+loop_branch() { echo "swarm/$(basename "$dir")/i$1/$2"; }
+# rw loop: iteration k branches every executor from the current best head (HEAD at k=1).
+loop_worktrees() {
+  local k=$1 id br path ref=HEAD
+  [[ ! -s $dir/loop.jsonl ]] || ref=$(jq -sr '[.[] | select(.best_head != null)] | last | .best_head // "HEAD"' "$dir/loop.jsonl")
+  for id in "${ids[@]}"; do
+    br=$(loop_branch "$k" "$id")
+    path=$(jq -r --arg b "$br" 'select(.branch == $b) | .path' "$dir/worktrees.jsonl" 2>/dev/null || true)
+    [[ -n $path ]] || path=$(worktree "$id" "$PROJECT" "$ref" "i$k")
+    wds[$id]=$path
+  done
+}
 load_run() {
   PROJECT=$(jq -er .project "$dir/run.json")
   synth=$(jq -er '.judge | .model? // .' "$dir/run.json"); synth_effort=$(jq -r '.judge | .effort? // ""' "$dir/run.json")
   timeout_s=$(jq -er .timeout "$dir/run.json"); quorum=$(jq -er .quorum "$dir/run.json")
-  kind=$(jq -r '.kind // "all"' "$dir/run.json")
+  kind=$(jq -r '.kind // "all"' "$dir/run.json"); mode=$(jq -r '.mode // "ro"' "$dir/run.json")
+  mapfile -t ids < <(jq -r '.agents[]?.id' "$dir/run.json")
   if [[ $kind == loop ]]; then
     stall_k=$(jq -er .stall_k "$dir/run.json"); max_iter=$(jq -er .max_iter "$dir/run.json")
     max_sessions=$(jq -er .max_sessions "$dir/run.json"); merge=$(jq -er .merge "$dir/run.json")
@@ -680,7 +824,7 @@ load_run() {
 sub=${1:---help}; shift || true
 case $sub in
   help|-h|--help) help_text; exit 0 ;;
-  version) echo 0.4.0; exit 0 ;;
+  version) echo 0.5.0; exit 0 ;;
   stop) (($# == 1)) || die 'stop DIR'
     [[ $(jq -r .kind "$1/run.json" 2>/dev/null) == loop ]] || die "not a loop run: $1"
     touch "$1/STOP"; echo 'swarm: loop stops after the current iteration' >&2; exit 0 ;;
@@ -691,6 +835,7 @@ case $sub in
   watch) (($# == 1)) || die 'watch DIR'; watch_run "$1"; exit ;;
   clean) (($# >= 1)) || die 'clean DIR [--discard BRANCH ...]'; clean "$@"; exit ;;
   wait) (($# >= 1)) || die 'wait DIR [-t SEC]'; wait_run "$@"; exit ;;
+  mass) sub=all; set -- -r 1 "$@" ;; # alias: one independent round, then the judge
   all|loop|run|judge|resume) ;;
   *) die "unknown command: $sub (see --help)" ;;
 esac
@@ -713,6 +858,7 @@ if [[ $sub == resume ]]; then
   if [[ -f $dir/worktrees.jsonl ]]; then
     while IFS= read -r row; do
       wd=$(jq -r .path <<< "$row"); base=$(jq -r .base <<< "$row"); branch=$(jq -r .branch <<< "$row")
+      [[ -d $wd || $(jq -r '.kind // ""' "$dir/run.json") != loop ]] || continue # removed loser worktree
       if [[ $(git -C "$wd" symbolic-ref --short HEAD) != "$branch" ]] ||
           ! git -C "$wd" merge-base --is-ancestor "$base" HEAD; then die "unsafe resume worktree: $wd"; fi
     done < "$dir/worktrees.jsonl"
@@ -729,7 +875,7 @@ if [[ $sub == resume ]]; then
   done < <(jq -c '.agents[]' "$dir/run.json")
   mkdir "$dir/.active" || die 'run is active'
   owns_run=1; resuming=1
-  rm -f "$dir/result.json"
+  rm -rf "$dir/result.json" "$dir/.backoff" # the operator resumes once limits have reset
   if [[ $kind == loop ]]; then rm -f "$dir/STOP"; loop_reopen; loop_run "$k"; fi
   all_rounds
 fi
@@ -769,12 +915,13 @@ if [[ $sub == judge ]]; then
   status "$dir"; branches
   exit
 fi
-while getopts ':j:t:o:r:m:S:q:K:I:B:wWdyh' opt; do
+while getopts ':j:t:o:r:m:S:q:K:I:B:wWdyMh' opt; do
   case $opt in
     j) jobs_max=$OPTARG ;; t) timeout_s=$OPTARG ;; o) out=$OPTARG ;;
     r) rounds=$OPTARG set_r=1 ;; m) models=$OPTARG ;; S) synth=$OPTARG ;; w) rw=1 ;;
     d) detached=1 ;; q) quorum=$OPTARG ;; W) watch_window=1 ;; y) assume_yes=1 ;;
     K) stall_k=$OPTARG loop_opts+=K ;; I) max_iter=$OPTARG loop_opts+=I ;; B) max_sessions=$OPTARG loop_opts+=B ;;
+    M) merge=1 loop_opts+=M ;;
     h) help_text; exit 0 ;; *) die 'invalid option or missing value (see --help)' ;;
   esac
 done
@@ -784,13 +931,16 @@ for n in "$jobs_max" "$timeout_s" "$rounds" "${quorum:-1}" "$stall_k" "${max_ite
   [[ $n =~ ^[1-9][0-9]*$ && ${#n} -le 8 ]] || die 'jobs, timeout, rounds, quorum, -K, -I and -B must be positive integers'
 done
 max_iter=${max_iter:-0} max_sessions=${max_sessions:-0}
-[[ $sub == loop || -z $loop_opts ]] || die '-K, -I and -B apply only to loop'
+[[ $sub == loop || -z $loop_opts ]] || die '-K, -I, -B and -M apply only to loop'
 if [[ $sub == loop ]]; then
   [[ -n $synth ]] || die 'loop requires -S judge'
   ((set_r == 0)) || die 'loop has no rounds (-r); each iteration is executors, then the judge'
-  ((rw == 0)) || die 'loop -w is not supported yet'
+  ((rw == 0 || merge == 0)) || die '-M (judge-merged text) is for text tasks; not with -w'
   rounds=1
 fi
+for n in "${SWARM_MASS_AT:-12}" "${SWARM_CONFIRM_OVER:-20}" "${SWARM_BACKOFF_BASE:-30}"; do
+  [[ $n =~ ^[0-9]{1,6}$ ]] || die 'SWARM_MASS_AT, SWARM_CONFIRM_OVER and SWARM_BACKOFF_BASE must be integers'
+done
 PROJECT=$PWD
 files=()
 if [[ $sub == run ]]; then
@@ -857,10 +1007,21 @@ else
   fi
   ((discovered == 0)) || [[ " ${available//$'\n'/ } " == *" $synth "* ]] || die "unknown judge: $synth"
   count=${#ms[@]}
+  # Mass runs tolerate a few failures by default: quorum ceil(0.6N), printed and overridable.
+  ((count <= ${SWARM_MASS_AT:-12})) || quorum=${quorum:-$(((3 * count + 4) / 5))}
+  quorum=${quorum:-$count}
+  preview
   if [[ $sub == loop ]]; then
-    echo "swarm: $count executors + judge = $((count+1)) sessions per iteration; $( ((max_iter)) && echo "max $max_iter iterations" || echo 'no iteration cap')" >&2
+    sessions=$((count + 1))
+    echo "swarm: $count executors + judge = $sessions sessions per iteration; $( ((max_iter)) && echo "max $max_iter iterations" || echo 'no iteration cap'); quorum $quorum; USD unknown" >&2
   else
-    echo "swarm: $count agents × $rounds rounds + judge = $((count*rounds+1)) sessions" >&2
+    sessions=$((count * rounds + 1))
+    echo "swarm: $count agents × $rounds rounds + judge = $sessions sessions; quorum $quorum; USD unknown" >&2
+  fi
+  if ((sessions > ${SWARM_CONFIRM_OVER:-20} && assume_yes == 0)); then
+    [[ -t 0 && -t 2 ]] || die "$sessions sessions exceed SWARM_CONFIRM_OVER=${SWARM_CONFIRM_OVER:-20}; rerun with -y"
+    read -r -p 'swarm: proceed? [y/N] ' answer
+    [[ $answer == [yY]* ]] || die 'cancelled'
   fi
 fi
 quorum=${quorum:-$count}
@@ -872,7 +1033,7 @@ if [[ ${SWARM_DETACHED_DIR:-} != "$dir" ]]; then
 fi
 if ((detached)) && [[ ${SWARM_DETACHED_DIR:-} != "$dir" ]]; then
   command -v setsid >/dev/null || die 'detached mode requires setsid'
-  SWARM_DEPTH=0 SWARM_DETACHED_DIR="$dir" setsid -f "$SELF" "$sub" "${original_args[@]:0:${#original_args[@]}-1}" -o "$dir" "${original_args[-1]}" </dev/null >"$dir/orchestrator.log" 2>&1
+  SWARM_DEPTH=0 SWARM_DETACHED_DIR="$dir" setsid -f "$SELF" "$sub" -y "${original_args[@]:0:${#original_args[@]}-1}" -o "$dir" "${original_args[-1]}" </dev/null >"$dir/orchestrator.log" 2>&1
   echo "swarm dir: $dir" >&2
   exit 0
 fi
