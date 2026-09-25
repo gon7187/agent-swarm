@@ -94,9 +94,13 @@ open_watch() {
   if [[ -z ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] || ! command -v "$terminal" >/dev/null; then
     echo 'swarm: watch window unavailable; use swarm.sh watch DIR' >&2
   else
-    ("$terminal" -e "$SELF" watch "$dir" >"$dir/watch.log" 2>&1 || echo 'swarm: watch terminal failed' >&2) &
-    # Do not count the viewer as an agent or wait for it before finishing.
-    disown "$!"
+    # Fully detach the viewer: it must never be waited for, killed on exit, or hold our stdout/stderr.
+    if command -v setsid >/dev/null; then
+      setsid -f "$terminal" -e "$SELF" watch "$dir" </dev/null >"$dir/watch.log" 2>&1
+    else
+      "$terminal" -e "$SELF" watch "$dir" </dev/null >"$dir/watch.log" 2>&1 &
+      disown "$!"
+    fi
   fi
 }
 # Track descendants across timeout's separate process group. Never signal our own group.

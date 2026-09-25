@@ -213,9 +213,16 @@ if wait "$cancel_pid"; then fail cancel; fi
 cat > "$T/terminal" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$TEST_ROOT/terminal-argv"
+echo $$ > "$TEST_ROOT/terminal-pid"
+exec sleep 60 # a real viewer never exits on its own
 STUB
 chmod +x "$T/terminal"
-DISPLAY=:stub SWARM_TERMINAL="$T/terminal" "$S" all -W -r 1 -o "$T/watch" hello > /dev/null
+# The run must finish even though the viewer window stays open.
+# Capture through a pipe like agent harnesses do: nothing may keep our stdout/stderr open.
+# shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash
+DISPLAY=:stub SWARM_TERMINAL="$T/terminal" timeout 30 bash -c '"$1" all -W -r 1 -o "$2" hello 2>&1 | cat > /dev/null' _ "$S" "$T/watch" ||
+  fail "run kept the caller's pipe open until the watch window closed"
+kill "$(cat "$T/terminal-pid")" 2>/dev/null || true
 has "$T/terminal-argv" watch
 has "$T/terminal-argv" "$T/watch"
 env -u DISPLAY -u WAYLAND_DISPLAY "$S" all -W -r 1 -o "$T/headless" hello > /dev/null
