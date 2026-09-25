@@ -139,7 +139,7 @@ swarm all -d "Review src/auth for security bugs"   # prints "swarm dir: .swarm/<
 swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still running, else the run's rc
 ```
 
-`-d` starts the orchestrator in its own session and logs to `<run>/orchestrator.log`. `wait` without `-t` blocks until the run ends. At the end the run writes `result.json` atomically:
+`-d` starts the orchestrator in its own session and logs to `<run>/orchestrator.log`. `wait DIR` without `-t` polls once and returns immediately (exit 75 while running); `wait DIR -t SEC` blocks for up to SEC seconds. For `run` batches `final` in `result.json` is `null`. At the end the run writes `result.json` atomically:
 
 ```json
 {"rc":0,"final":".swarm/<run>/final.md","partial":false,"winner":"swarm/<run>/a2","branches":["swarm/<run>/a1","swarm/<run>/a2"]}

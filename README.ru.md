@@ -139,7 +139,7 @@ swarm all -d "Review src/auth for security bugs"   # печатает "swarm dir
 swarm wait .swarm/<run> -t 300                      # 0 = готово, 75 = ещё идёт, иначе код выхода запуска
 ```
 
-`-d` запускает оркестратор в отдельной сессии и пишет лог в `<run>/orchestrator.log`. `wait` без `-t` ждёт до конца запуска. В конце запуск атомарно записывает `result.json`:
+`-d` запускает оркестратор в отдельной сессии и пишет лог в `<run>/orchestrator.log`. `wait DIR` без `-t` проверяет один раз и сразу возвращается (код 75, пока запуск идёт); `wait DIR -t SEC` ждёт до SEC секунд. Для пакетов `run` поле `final` в `result.json` равно `null`. В конце запуск атомарно записывает `result.json`:
 
 ```json
 {"rc":0,"final":".swarm/<run>/final.md","partial":false,"winner":"swarm/<run>/a2","branches":["swarm/<run>/a1","swarm/<run>/a2"]}
