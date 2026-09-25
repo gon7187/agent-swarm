@@ -94,7 +94,7 @@ If a `run` task sets `dir` to a subdirectory of the repository, the agent works 
 
 rw Claude agents commit their own work; for Codex, the orchestrator commits. After each rw agent, `swarm.sh`:
 
-1. auto-commits leftover changes **only if the agent succeeded** (`rc == 0`), and only after checking that `HEAD` is on the branch recorded in `worktrees.jsonl` (`git symbolic-ref --short HEAD`) and descends from the recorded base (`git merge-base --is-ancestor`). The commit uses `-c user.name=swarm -c user.email=swarm@localhost` as a fallback identity, and the committed paths are recorded as `autocommitted` in the manifest;
+1. auto-commits leftover changes **only if the agent succeeded** (`rc == 0`), and only after checking that `HEAD` is on the branch recorded in `worktrees.jsonl` (`git symbolic-ref --short HEAD`) and descends from the recorded base (`git merge-base --is-ancestor`). The commit always uses `-c user.name=swarm -c user.email=swarm@localhost`, overriding your own git identity if you have one configured, and the committed paths are recorded as `autocommitted` in the manifest;
 2. sets `rc=71` and leaves the files untouched if either check or the commit fails;
 3. appends `{id, branch, base, head, dirty}` to `manifest.jsonl` and writes `git diff <base>` to `r<N>/<id>.diff`.
 

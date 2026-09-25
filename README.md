@@ -157,8 +157,8 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `swarm.sh loop [opts] "task"` | Judge-driven iteration toward an ideal result, no iteration cap: see [`loop`](#loop-iterate-to-an-ideal-result) |
 | `swarm.sh mass [opts] "task"` | Alias for `all -r 1`, meant for large `*count` rosters: see [`mass`](#mass-run-many-agents-at-once) |
 | `swarm.sh stop DIR` | Ask a running `loop` to stop after the iteration in progress (touches `DIR/STOP`) |
-| `swarm.sh judge DIR [-S MODEL]` | Rerun only the judge: for `all`/`run`, on the task and last round; for `loop`, the judge of the latest incomplete iteration. For example after the judge failed |
-| `swarm.sh resume DIR` | Continue an interrupted run: rerun only agents without a successful `.rc`, then the remaining rounds and the judge (`all`/`run`), or the next iteration (`loop`, branching on `run.json`'s `kind`). Refuses if the task, `anon.map` or options have changed |
+| `swarm.sh judge DIR [-S MODEL]` | Rerun only the judge: for `all`, on the task and last round; for `loop`, the judge of the latest incomplete iteration. Not available for `run`, which has no judge. For example after the judge failed |
+| `swarm.sh resume DIR` | Continue an interrupted run: rerun only agents without a successful `.rc`, then the remaining rounds and the judge (`all`), or the next iteration (`loop`, branching on `run.json`'s `kind`). Not available for `run`. Refuses if the task, `anon.map` or options have changed |
 | `swarm.sh wait DIR [-t SEC]` | Wait for a run, typically one started with `-d`. Exit 0 when done, 75 when still running after `SEC`, otherwise the run's exit code |
 | `swarm.sh watch DIR [--plain]` | Live chat view of the run (see [Live chat view](#live-chat-view)); `--plain` shows the status table instead |
 | `swarm.sh post DIR FROM "text" [TO]` | Post to the board (`TO` = agent id, default `all`). Inside a worker, `DIR` and `FROM` are fixed by the worker's own outbox |
@@ -170,7 +170,7 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | Option | Default | Meaning |
 |---|---|---|
 | `-m "a b"` | one model per harness | Model subset; `-m all` = full roster. Each item is a [model spec](#model-spec) `model[@effort][*count]` |
-| `-r N` | `2` | Rounds (`all` only; `loop` rejects `-r`, `mass` is fixed at 1 round) |
+| `-r N` | `2` | Rounds (`all` only; `loop` and `mass` reject `-r` — `mass` is fixed at 1 round) |
 | `-q N` | all agents (`ceil(0.6N)` for `mass`) | Quorum: minimum valid answers per round to continue; below "all" the result is marked `PARTIAL`. Failed agents are not relaunched in later rounds |
 | `-S MODEL[@effort]` | first roster model not taking part | Judge; `loop` requires `-S` |
 | `-w` | off | Read-write, one git worktree per agent; in `loop` each iteration branches from the judge-chosen branch |
@@ -182,7 +182,7 @@ swarm wait .swarm/<run> -t 300                      # 0 = done, 75 = still runni
 | `-y` | off | Skip the confirmation prompt above `SWARM_CONFIRM_OVER` sessions (`mass`, or any `*count` roster) |
 | `-K N` | `3` | `loop`: consecutive stalled iterations (no score gain) before the judge must justify continuing with a `strategy_change` |
 | `-I N` | none | `loop`: stop after N iterations, exit 4 |
-| `-B N` | none | `loop`/`mass`: stop after N total sessions, exit 4 |
+| `-B N` | none | `loop`: stop after N total sessions, exit 4 |
 | `-U USD` | none | `loop`: stop once the known (Claude-reported) cost reaches USD, exit 4; Codex cost is unknown and not counted |
 | `-M` | off | `loop`: let the judge pick `MERGED` text as the new incumbent (text tasks only, forbidden with `-w`) |
 
@@ -245,15 +245,16 @@ swarm.sh judge DIR    # rerun the judge of the latest incomplete iteration
   {"verdict":"CONTINUE","score":82,"incumbent_score":78,"best":"a3",
    "defects":["..."],"directions":["..."],"strategy_change":""}
   ```
-  `verdict` is `STOP` (no material defect remains — never because of cost or fatigue), `CONTINUE` (needs both `defects` and concrete `directions` that differ from what was already tried), or `PAUSE` (no credible route forward; an honest way out so the judge has no reason to claim `STOP` falsely). A decision that fails validation is retried once with the parse error appended to the prompt; a second failure sets the judge's `.rc` to 65 and the run can be resumed or re-judged with `swarm.sh judge DIR`. A malformed decision never counts as `STOP`.
+  `verdict` is `STOP` (no material defect remains — never because of cost or fatigue), `CONTINUE` (needs both `defects` and concrete `directions` that differ from what was already tried), or `PAUSE` (no credible route forward; an honest way out so the judge has no reason to claim `STOP` falsely). A `best` other than `INCUMBENT` must score at least `incumbent_score` — a decision naming a lower-scoring candidate as the new best fails validation like any other malformed decision. A decision that fails validation is retried once with the parse error appended to the prompt; a second failure sets the judge's `.rc` to 65 and the run can be resumed or re-judged with `swarm.sh judge DIR`. A malformed decision never counts as `STOP`.
 - **Stalling and oscillation:** `gain = score − incumbent_score`, from the same judgment. An iteration is stalled when `gain < 1` or `best == INCUMBENT`. After `-K` (default 3) consecutive stalls, the judge's prompt adds a stagnation notice and a `CONTINUE` verdict must include a `strategy_change` that differs from earlier ones. Oscillation (the same `best.md` recurring) is flagged to the judge the same way.
-- **Stopping it yourself:** `swarm.sh stop DIR` (checked between iterations), `-I max_iter`, `-B max_sessions`. None of these count as the judge finding an ideal result.
+- **Stopping it yourself:** `swarm.sh stop DIR` (checked between iterations, and cleared by `resume`) is resumable. `-I max_iter`, `-B max_sessions` and `-U max_usd` are final for that run instead: the limit is saved in `run.json`, so `swarm.sh resume DIR` re-checks it immediately and exits 4 again without doing any new work — start a new run with a higher limit if you want to keep going. None of these count as the judge finding an ideal result.
 - **Exit codes:**
 
   | Outcome | Exit code |
   |---|---|
   | `STOP`, ideal | 0 |
-  | `PAUSE`, `-I`/`-B` limit reached, or `stop DIR` (resumable) | 4 |
+  | `PAUSE`, or `stop DIR` (resumable) | 4 |
+  | `-I`/`-B`/`-U` limit reached (not resumable, see above) | 4 |
   | Judge failed twice | 65 |
   | Quorum not met | 1 |
   | Interrupted by signal | 130 / 143 |
@@ -269,11 +270,11 @@ swarm.sh judge DIR    # rerun the judge of the latest incomplete iteration
 
 - **Preview and confirmation.** The usual session-count line becomes a table: spec, engine, count, sessions, quorum. Above `SWARM_CONFIRM_OVER` sessions (default 20), the run asks for confirmation on a TTY, or fails with exit code 2 on a non-TTY without `-y`.
 - **Quorum** defaults to `ceil(0.6N)` for `mass` (still overridable with `-q`; `all`'s own default is unchanged), so one lost agent out of a hundred does not sink the run.
-- **Rate limits are handled per agent, not by aborting the run.** A transient failure (rate limit / 429 / too many requests / overloaded / 529 — classified only from the exit code and error events, never from answer text) gets the agent retried up to 3 times with backoff (`min(900, BASE·2^n)` plus jitter); an exhausted-quota failure — Codex's own message is *"You've hit your usage limit..."* — marks that engine dead for the rest of the run, skips its remaining queued agents, and records both in `PARTIAL` and `failures.jsonl`. Models are never substituted automatically.
-- **Judging is a tournament**, not one judge reading a hundred files: agents are split into groups of 8, a sub-judge per group forwards its top candidate(s), and the final judge reads only the survivors plus every sub-judge's report. 100 answers with top-1 forwarding is 16 judge sessions total (13 group judges + 2 more levels + 1 final).
+- **Rate limits are handled per agent, not by aborting the run.** A transient failure (rate limit / 429 / too many requests / overloaded / 529 — classified only from the exit code and error events, never from answer text) gets the agent retried up to 3 times with backoff (`min(900, BASE·2^n)` plus jitter); an exhausted-quota failure — Codex's own message is *"You've hit your usage limit..."* — marks that engine dead for the rest of the run, skips its remaining queued agents, and records both in `PARTIAL` and `failures.jsonl`. Models are never substituted automatically. Judges get the same retry and backoff as executors: a transient failure on a sub-judge or the final judge no longer fails the run outright.
+- **Judging is a tournament**, not one judge reading a hundred files: agents are split into groups of 8, a sub-judge per group forwards its top candidate(s), and the final judge reads only the survivors plus every sub-judge's report. 100 answers with top-1 forwarding is 16 judge sessions total (13 group judges + 2 more levels + 1 final); at the default `SWARM_TOP=2`, it's 18 (17 sub-judges + 1 final).
 - **Board and anonymity** work the same as `all`: ids are shuffled, effort is never shown in prompts, and messages are still evidence, never instructions.
 
-Ring peer critique (`-r 2`: each answer is read by `SWARM_PEERS` peers instead of everyone), tournament judging (groups of `SWARM_GROUP` answers, each sub-judge forwards `SWARM_TOP`; about 16 judge sessions for 100 answers), board message caps (2 KB per message, 20 per outbox in mass runs) and `-X "specs"` (explore with the `-m` roster in iteration 1, then refine with a smaller `-X` roster) are all part of v0.5.0.
+Ring peer critique (`-r 2`: each answer is read by `SWARM_PEERS` peers instead of everyone), tournament judging (groups of `SWARM_GROUP` answers, each sub-judge forwards `SWARM_TOP`; 18 judge sessions for 100 answers at the `SWARM_TOP=2` default, 16 forwarding just the top 1), board message caps (2 KB per message, 20 per outbox in mass runs) and `-X "specs"` (explore with the `-m` roster in iteration 1, then refine with a smaller `-X` roster) are all part of v0.5.0.
 
 ## Per-agent tasks (`run`)
 
@@ -295,7 +296,7 @@ swarm run -j 3 tasks.jsonl
 
 rw Claude agents commit their own work. Codex rw agents cannot, because their sandbox does not include the repository's git directory, so the orchestrator commits for them. After each rw agent the script:
 
-1. **Commits leftovers only on success.** If the agent exited 0 and left uncommitted changes, they are committed, but only if `HEAD` is still on the branch recorded in `worktrees.jsonl` and still descends from the recorded base. If you have no git identity configured, the commit uses `swarm <swarm@localhost>`. The committed paths are recorded as `autocommitted` in the manifest. A failed agent's changes are never committed.
+1. **Commits leftovers only on success.** If the agent exited 0 and left uncommitted changes, they are committed, but only if `HEAD` is still on the branch recorded in `worktrees.jsonl` and still descends from the recorded base. The commit always uses `swarm <swarm@localhost>` (`git -c user.name=swarm -c user.email=swarm@localhost`), overriding your own git identity if you have one configured, so leftover auto-commits are easy to spot in `git log`. The committed paths are recorded as `autocommitted` in the manifest. A failed agent's changes are never committed.
 2. **Fails visibly.** If the branch check or the commit fails, the agent gets `rc=71` and its files are left as they are for you to inspect. A branch without its commit is never offered for merging.
 3. **Records the result.** `{id, branch, base, head, dirty}` goes to `manifest.jsonl`, and `git diff base` to `r<N>/<id>.diff`.
 
@@ -349,6 +350,16 @@ Inside a worker, `post` ignores the `DIR` and `FROM` arguments and writes to the
 - **Workers follow the project's config, not your user config.** Claude workers load only project and local settings (`--setting-sources project,local`) and no MCP servers (`--strict-mcp-config`), so the project `CLAUDE.md` applies while your user hooks, output style and MCP servers do not. Codex workers run with `--ignore-user-config`, which skips `~/.codex/config.toml` and nothing else; for example, Codex still reads `AGENTS.md` files as usual. `SWARM_INHERIT_CONFIG=1` turns this off.
 - **Ctrl-C stops everything.** Interrupting `swarm.sh` kills the whole process tree of every running worker; timeouts escalate to `SIGKILL` after 30 seconds. No orphaned sessions keep billing.
 - **Nesting guard.** Workers run with `SWARM_DEPTH=1` and `swarm.sh` refuses to start inside a worker, so a swarm cannot spawn swarms recursively.
+
+### Security notes
+
+Run swarm only on repos and tasks you trust:
+
+- Claude workers get `WebSearch`/`WebFetch` on their allowlist by default, even in read-only mode.
+- Codex workers inherit your full shell environment (`shell_environment_policy.inherit=all`), including any secrets in it.
+- `anon.map` is written inside the run directory, which is on every Claude worker's `--add-dir`; only the prompt's instruction not to read it stops a worker from doing so.
+- Claude workers load the target repo's own project `.claude/settings.json` (`--setting-sources project,local`).
+- Board messages are stripped of control characters before `chat`/`read`/`watch` display them, but their text is still untrusted evidence, never instructions — see the preamble note above.
 
 ## Cost
 
