@@ -375,13 +375,15 @@ branches() {
   base=$(jq -r --arg b "$winner" 'select(.branch == $b) | .base' "$dir/worktrees.jsonl")
   printf 'git diff %q\ngit merge -- %q\n' "$base..$winner" "$winner"
 }
-# shellcheck disable=SC2329 # Called by EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Called by EXIT trap.
 write_result() {
   local rc=$1
-  jq -n --argjson rc "$rc" --arg final "$dir/final.md" --arg winner "${winner:-}" \
+  local final=''
+  [[ ! -s $dir/final.md ]] || final=$dir/final.md # batch runs have no judge
+  jq -n --argjson rc "$rc" --arg final "$final" --arg winner "${winner:-}" \
     --argjson partial "$(if [[ -f $dir/PARTIAL ]]; then echo true; else echo false; fi)" \
     --slurpfile branches <(cat "$dir/worktrees.jsonl" 2>/dev/null || true) \
-    '{rc:$rc,final:$final,partial:$partial,winner:(if $winner == "" then null else $winner end),branches:$branches}' > "$dir/result.json.tmp"
+    '{rc:$rc,final:(if $final == "" then null else $final end),partial:$partial,winner:(if $winner == "" then null else $winner end),branches:$branches}' > "$dir/result.json.tmp"
   mv "$dir/result.json.tmp" "$dir/result.json"
 }
 wait_run() {

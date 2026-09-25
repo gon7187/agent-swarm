@@ -102,6 +102,7 @@ wait
 reject "$S" post "$T/board" ../escape invalid
 printf '%s\n' '{"id":"one","model":"sonnet","prompt":"hello"}' '{"id":"two","model":"gpt-test","prompt":"hello"}' > "$T/tasks.jsonl"
 "$S" run -j 2 -o "$T/run space" "$T/tasks.jsonl"
+[[ $(jq .final "$T/run space/result.json") == null ]] || fail "batch run must not point result.final at a missing judge answer"
 [[ $(cat "$T/run space/one.rc") == 0 ]] || fail run
 has <("$S" status "$T/run space") 'done rc=0'
 has <("$S" status "$T/run space") 'COST=0.1'
