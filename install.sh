@@ -35,7 +35,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --default) DO_DEFAULT=1; shift ;;
     --uninstall) DO_UNINSTALL=1; shift ;;
-    --prefix) PREFIX="$2"; shift 2 ;;
+    --prefix)
+      [ $# -ge 2 ] || die "--prefix requires a value (see --help)"
+      PREFIX="$2"; shift 2 ;;
     --prefix=*) PREFIX="${1#*=}"; shift ;;
     --no-link) DO_LINK=0; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -43,9 +45,48 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --- resolve and sanity-check the install prefix ---
+[ -n "$PREFIX" ] || die "--prefix requires a non-empty value"
+PREFIX="$(realpath -m -- "$PREFIX")" || die "cannot resolve --prefix path"
+if [ -z "$PREFIX" ] || [ "$PREFIX" = "/" ]; then
+  die "refusing to use --prefix / (too dangerous)"
+fi
+[ "$PREFIX" != "$HOME" ] || die "refusing to use --prefix \$HOME ($PREFIX)"
+case "$HOME" in
+  "$PREFIX"/*) die "refusing to use --prefix $PREFIX (an ancestor of \$HOME)" ;;
+esac
+
+# Only true if $dir doesn't exist, or looks like a previous swarm install.
+looks_like_swarm_install() {
+  local dir="$1"
+  [ -e "$dir" ] || return 0
+  [ -d "$dir" ] && [ -f "$dir/SKILL.md" ] && [ -f "$dir/swarm.sh" ]
+}
+
+# Fails with a clear message and leaves $1 untouched if its swarm marker
+# block isn't exactly one well-formed begin/end pair (or absent entirely).
+check_markers() {
+  local file="$1" bc ec bl el
+  [ -f "$file" ] || return 0
+  bc="$(grep -Fc "$BEGIN_MARK" "$file" || true)"
+  ec="$(grep -Fc "$END_MARK" "$file" || true)"
+  if [ "$bc" -eq 0 ] && [ "$ec" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$bc" -ne 1 ] || [ "$ec" -ne 1 ]; then
+    die "malformed swarm marker block in $file (expected exactly one begin/end pair, found $bc begin, $ec end); leaving it unchanged"
+  fi
+  bl="$(grep -Fn "$BEGIN_MARK" "$file" | cut -d: -f1)"
+  el="$(grep -Fn "$END_MARK" "$file" | cut -d: -f1)"
+  if [ "$bl" -ge "$el" ]; then
+    die "malformed swarm marker block in $file (end marker appears before begin marker); leaving it unchanged"
+  fi
+}
+
 # Replace or append an idempotent marked block in $1, backing up on first edit.
 upsert_block() {
   local file="$1" content="$2"
+  check_markers "$file"
   mkdir -p "$(dirname "$file")"
   if [ -f "$file" ] && grep -qF "$BEGIN_MARK" "$file"; then
     local tmp; tmp="$(mktemp)"
@@ -65,6 +106,7 @@ upsert_block() {
 strip_block() {
   local file="$1"
   [ -f "$file" ] || return 0
+  check_markers "$file"
   grep -qF "$BEGIN_MARK" "$file" || return 0
   local tmp; tmp="$(mktemp)"
   awk -v begin="$BEGIN_MARK" -v end="$END_MARK" '
@@ -77,8 +119,12 @@ strip_block() {
 }
 
 if [ "$DO_UNINSTALL" -eq 1 ]; then
-  info "removing $PREFIX"
-  rm -rf "$PREFIX"
+  if looks_like_swarm_install "$PREFIX"; then
+    info "removing $PREFIX"
+    rm -rf "$PREFIX"
+  else
+    warn "not removing $PREFIX: it doesn't look like a swarm install (expected SKILL.md and swarm.sh); leaving it in place"
+  fi
   [ -L "${HOME}/.claude/skills/swarm" ] && rm -f "${HOME}/.claude/skills/swarm"
   [ -L "${HOME}/.local/bin/swarm" ] && rm -f "${HOME}/.local/bin/swarm"
   strip_block "${HOME}/.claude/CLAUDE.md"
@@ -88,15 +134,28 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
 fi
 
 # --- dependency checks ---
-((BASH_VERSINFO[0] >= 4)) || die "bash >= 4 required (found ${BASH_VERSION})"
+BASH_OK=0
+if ((BASH_VERSINFO[0] > 4)); then
+  BASH_OK=1
+elif ((BASH_VERSINFO[0] == 4)) && ((BASH_VERSINFO[1] >= 3)); then
+  BASH_OK=1
+fi
+((BASH_OK)) || die "bash >= 4.3 required (found ${BASH_VERSION})"
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v jq  >/dev/null 2>&1 || die "jq is required"
 command -v claude >/dev/null 2>&1 || command -v codex >/dev/null 2>&1 || \
   warn "neither 'claude' nor 'codex' found on PATH — swarm will have nothing to run"
 
+looks_like_swarm_install "$PREFIX" || die "refusing to overwrite $PREFIX: it doesn't look like a swarm install (expected SKILL.md and swarm.sh)"
+
 # --- locate skill/ source: local checkout or fresh clone ---
 CLEANUP_DIR=""
-cleanup() { if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi; }
+TMP_PREFIX_DIR=""
+cleanup() {
+  [ -n "$CLEANUP_DIR" ] && rm -rf "$CLEANUP_DIR"
+  [ -n "$TMP_PREFIX_DIR" ] && rm -rf "$TMP_PREFIX_DIR"
+  return 0
+}
 trap cleanup EXIT
 
 SOURCE="${BASH_SOURCE[0]:-}"
@@ -112,12 +171,15 @@ if [ -z "$REPO_ROOT" ]; then
   REPO_ROOT="$CLEANUP_DIR"
 fi
 
-# --- install ---
+# --- install: stage into a temp sibling, then move into place atomically ---
 info "installing to $PREFIX"
-rm -rf "$PREFIX"
 mkdir -p "$(dirname "$PREFIX")"
-cp -r "$REPO_ROOT/skill" "$PREFIX"
-chmod +x "$PREFIX/swarm.sh"
+TMP_PREFIX_DIR="$(mktemp -d "$(dirname "$PREFIX")/.swarm-install.XXXXXX")"
+cp -r "$REPO_ROOT/skill/." "$TMP_PREFIX_DIR/"
+chmod +x "$TMP_PREFIX_DIR/swarm.sh"
+rm -rf "$PREFIX"
+mv "$TMP_PREFIX_DIR" "$PREFIX"
+TMP_PREFIX_DIR=""
 
 if [ -d "${HOME}/.claude" ]; then
   mkdir -p "${HOME}/.claude/skills"
