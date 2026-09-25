@@ -104,13 +104,13 @@ open_watch() {
   fi
 }
 # Track descendants across timeout's separate process group. Never signal our own group.
-# shellcheck disable=SC2329 # Called recursively from the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Called recursively from the EXIT trap.
 descendants() {
   local child
   while read -r child; do descendants "$child"; done < <(pgrep -P "$1" || true)
   echo "$1"
 }
-# shellcheck disable=SC2329 # EXIT trap handler.
+# shellcheck disable=SC2317,SC2329 # EXIT trap handler.
 cleanup() {
   local rc=$? p f
   trap - EXIT INT TERM
