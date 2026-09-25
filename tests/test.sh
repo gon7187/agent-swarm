@@ -9,15 +9,22 @@ unset SWARM_AGENT_DIR SWARM_INHERIT_CONFIG SWARM_UNSAFE_RW SWARM_RW_ALLOW SWARM_
 export SWARM_CLAUDE_BIN="$T/claude" SWARM_CODEX_BIN="$T/codex"
 export SWARM_CLAUDE_MODELS='sonnet claude-other' SWARM_CODEX_MODELS='gpt-test gpt-other'
 export TEST_ROOT=$T
+FIXTURES=$(realpath "$(dirname "$0")/fixtures")
+export FIXTURES
 cat > "$T/harness" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 engine=${0##*/}
 if [[ ${1:-} == debug ]]; then
   [[ ! -e $TEST_ROOT/discovery-fail ]] || exit 1
-  echo '[{"slug":"gpt-test","visibility":"list"},{"slug":"hidden","visibility":"hide"}]'; exit
+  echo '[{"slug":"gpt-test","visibility":"list","supported_reasoning_efforts":[{"effort":"low"},{"effort":"high"}]},{"slug":"hidden","visibility":"hide"}]'; exit
 fi
 printf '%s\n' "$@" > "$SWARM_AGENT_DIR/argv"
+if [[ -d $TEST_ROOT/conc ]]; then # record peak concurrency
+  mkdir "$TEST_ROOT/conc/$$"
+  trap 'rmdir "$TEST_ROOT/conc/$$"' EXIT
+  find "$TEST_ROOT/conc" -mindepth 1 -maxdepth 1 | wc -l >> "$TEST_ROOT/conc.max"
+fi
 out='' prompt='' model='' root=''
 while (($#)); do
   case $1 in
@@ -38,6 +45,15 @@ eval "${post_cmd% \[target_agent_id\]}" >/dev/null
 # Ignore DIR and spoofed sender when bound to a worker outbox.
 "$TEST_ROOT/swarm" post "$TEST_ROOT/spoof" fake bound >/dev/null
 [[ $prompt != *SLOW* ]] || sleep 3
+[[ $prompt != *CONC* ]] || sleep 0.1
+[[ $prompt != *LAUNCHLOG* ]] || echo "$engine ${SWARM_AGENT_DIR##*/}" >> "$TEST_ROOT/launches"
+if [[ $engine == codex && ${SWARM_AGENT_DIR##*/} != judge ]]; then
+  if [[ $prompt == *RATE429* && ! -e $TEST_ROOT/rate-hit ]]; then
+    touch "$TEST_ROOT/rate-hit"; echo '{"type":"error","message":"429 Too Many Requests"}'; exit 1
+  fi
+  [[ $prompt != *EXHAUST* ]] || { cat "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
+  [[ $prompt != *RLITEM* ]] || { head -n 4 "$FIXTURES/codex-usage-limit.jsonl"; exit 1; }
+fi
 if [[ $prompt == *TREE* || ( ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-tree ) ]]; then
   bash -c 'trap "" TERM; echo "$BASHPID" > "$TEST_ROOT/descendant"; while :; do sleep 1; done' &
   wait
@@ -52,10 +68,11 @@ fi
 if [[ ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-no-output ]]; then
   exit 0
 fi
-answer='FINAL ANSWER (complete, standalone): harness answer'
+answer="FINAL ANSWER (complete, standalone): harness answer from ${SWARM_AGENT_DIR##*/}"
 [[ $prompt != *NOFINAL* ]] || answer='incomplete answer'
 [[ $prompt != *MDHEADING* ]] || answer=$'Analysis first.\n\n## **FINAL ANSWER**\nharness answer'
 [[ $prompt != *INLINEFINAL* ]] || answer='this merely mentions a FINAL ANSWER inline'
+[[ $prompt != *RLTEXT* ]] || answer='The upstream API hit a rate limit (429 Too Many Requests); usage limit notes.'
 if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
   run_dir=${SWARM_AGENT_DIR%/a/judge}
   if [[ -f $run_dir/worktrees.jsonl ]]; then
@@ -65,10 +82,34 @@ if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
     answer+=$'\nWINNER: '"$winner"
   fi
 fi
+# Loop judge: each call consumes the next judge-script line "VERDICT SCORE BEST [INCUMBENT_SCORE] [BAD|DEFECTS|STRAT|MERGE|TRAIL]".
+if [[ ${SWARM_AGENT_DIR##*/} == judge && $prompt == *'You are the loop judge'* ]]; then
+  n=$(( $(cat "$TEST_ROOT/judge-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$TEST_ROOT/judge-n"
+  [[ $prompt != *DIRTYWIN* ]] || echo late > "$(jq -r .path "${SWARM_AGENT_DIR%/a/judge}/worktrees.jsonl" | tail -n 1)/late"
+  v='' s='' b='' i='' x=''
+  read -r v s b i x < <(sed -n "${n}p" "$TEST_ROOT/judge-script") || true
+  if [[ $v == BAD ]]; then answer='no decision here'
+  else
+    json=$(jq -cn --arg v "$v" --argjson s "$s" --arg b "$b" --argjson i "${i:-0}" --arg x "${x:-}" --arg n "$n" '{verdict:$v,score:$s,incumbent_score:$i,best:$b,
+      defects:(if $v == "STOP" and $x != "DEFECTS" then [] else ["defect \($n)"] end),
+      directions:(if $v == "STOP" then [] else ["direction \($n)"] end),
+      strategy_change:(if $x == "STRAT" then "strategy \($n)" else "" end)}')
+    answer=$'Judgment.\n```json\n'"$json"$'\n```'
+    [[ ${x:-} != MERGE ]] || answer=$'=== BEST ===\nmerged text\n=== END BEST ===\n'"$answer"
+    [[ ${x:-} != TRAIL ]] || answer+=$'\ntrailing prose'
+  fi
+fi
+# Tournament sub-judges forward the first listed answer; BADSUB breaks group L1-g1.
+if [[ ${SWARM_AGENT_DIR##*/} == judge-L* ]]; then
+  first=$(grep -m1 -E '^/.*\.md$' <<< "$prompt"); first=${first##*/}
+  answer=$'Group verdict.\n```json\n{"top":["'"${first%.md}"$'"],"minority":[]}\n```'
+  [[ $prompt != *BADSUB* || ${SWARM_AGENT_DIR##*/} != judge-L1-g1 ]] || answer='no report'
+fi
 if [[ $prompt == *EMPTY* || ( $prompt == *MIXED* && $model == gpt-test ) ]]; then
   if [[ $engine == claude ]]; then echo '{"result":"","total_cost_usd":0.1}'; else : > "$out"; fi
 elif [[ $engine == claude ]]; then
   if [[ $prompt == *APIERROR* ]]; then echo '{"result":"error","is_error":true}'
+  elif [[ $prompt == *CUSTOMRL* && ${SWARM_AGENT_DIR##*/} != judge ]]; then echo '{"result":"custom-throttle hit","is_error":true}'
   else jq -cn --arg answer "$answer" '{result:$answer,is_error:false,total_cost_usd:0.1,usage:{input_tokens:10}}'; fi
 else
   printf '%s\n' "$answer" > "$out"
@@ -86,7 +127,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 reject() { if "$@" >"$T/reject.log" 2>&1; then fail "accepted: $*"; fi; }
 has() { local contents; contents=$(cat "$1"); grep -Fq -- "$2" <<< "$contents" || fail "missing $2 in $1"; }
 not_has() { local contents; contents=$(cat "$1"); if grep -Fq -- "$2" <<< "$contents"; then fail "unexpected $2 in $1"; fi; }
-[[ $("$S" version) == 0.4.0 ]] || fail version
+[[ $("$S" version) == 0.5.0 ]] || fail version
 has <("$S" --help) 'watch DIR'
 [[ $("$S" roster | wc -l) == 4 ]] || fail roster
 [[ $(env -u SWARM_CODEX_MODELS "$S" roster | tail -1) == gpt-test ]] || fail discovery
@@ -124,7 +165,8 @@ not_has "$T/run space/a/two/argv" --add-dir
 has <("$S" watch "$T/run space") bound
 "$S" all -r 2 -o "$T/all" hello 2> "$T/all-launch"
 has "$T/all-launch" '2 agents × 2 rounds + judge = 5 sessions'
-[[ $(jq -r .judge "$T/all/run.json") == claude-other ]] || fail independent-judge
+[[ $(jq -r .judge.model "$T/all/run.json") == claude-other ]] || fail independent-judge
+[[ $(jq -r .kind "$T/all/run.json") == all ]] || fail run-kind
 [[ -s $T/all/r2/a1.md && -s $T/all/final.md ]] || fail all
 [[ $(jq -s length "$T/all"/a/*/outbox.jsonl) == 10 ]] || fail rounds
 has "$T/all/a/a1/prompt" 'REFUTED (claim'
@@ -390,4 +432,220 @@ rm .git/hooks/pre-commit
 # Judge receives only the newest manifest snapshots and their diffs.
 not_has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r1/a1.diff"
 has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r2/a1.diff"
+# --- v0.5: model[@effort][*count] specs.
+rc_is() { local want=$1 rc=0; shift; "$@" >"$T/rc.log" 2>&1 || rc=$?; [[ $rc == "$want" ]] || fail "rc $rc (want $want): $*"; }
+"$S" all -r 1 -m 'sonnet@xhigh gpt-test@high' -S claude-other@low -o "$T/effort" hello >/dev/null
+grep -A1 -Fx -- --effort "$T/effort"/a/a*/argv | grep -Fq xhigh || fail claude-effort
+has <(cat "$T/effort"/a/a*/argv) model_reasoning_effort=high
+[[ $(grep -A1 -Fx -- --effort "$T/effort/a/judge/argv" | tail -n 1) == low ]] || fail judge-effort
+has "$T/effort/anon.map" $'\tsonnet\txhigh'
+[[ $(jq -r '.judge.effort' "$T/effort/run.json") == low && $(jq -r '[.agents[].effort] | sort | join(",")' "$T/effort/run.json") == high,xhigh ]] || fail effort-run-json
+for spec in gpt-test@ultra 'sonnet*0' a@b@c 'sonnet@low sonnet@low' sonnet@huge; do
+  rc_is 2 "$S" all -r 1 -m "$spec" -S claude-other -o "$T/badspec" hello
+  [[ ! -d $T/badspec ]] || fail "bad spec created a run dir: $spec"
+done
+has "$T/rc.log" 'invalid effort'
+rc_is 2 "$S" all -r 1 -m sonnet -S 'claude-other*2' -o "$T/badspec" hello
+"$S" all -r 1 -m 'sonnet@low*3 sonnet@high' -S claude-other -o "$T/count" hello >/dev/null
+[[ $(grep -c $'\tsonnet\tlow$' "$T/count/anon.map") == 3 && $(wc -l < "$T/count/anon.map") == 4 ]] || fail spec-count
+# --- v0.5: read-only loop. The stub judge replays $T/judge-script, one line per call.
+script() { rm -f "$T/judge-n"; printf '%s\n' "$@" > "$T/judge-script"; }
+loop() { "$S" loop -m 'sonnet gpt-test' -S claude-other "$@"; }
+rc_is 2 "$S" loop -m sonnet hello
+rc_is 2 "$S" loop -r 2 -m sonnet -S claude-other hello
+rc_is 2 "$S" loop -w -m sonnet -S claude-other hello
+rc_is 2 "$S" all -I 3 -m sonnet -S claude-other hello
+rc_is 2 "$S" stop "$T/all"
+script 'CONTINUE 70 a1 0' 'STOP 90 INCUMBENT 90'
+loop -o "$T/loop" hello > "$T/loop.out" 2> "$T/loop.err"
+[[ $(wc -l < "$T/loop/loop.jsonl") == 2 && $(jq .ideal "$T/loop/result.json") == true && $(jq -r .kind "$T/loop/run.json") == loop ]] || fail loop-basic
+[[ $(jq -c .score_history "$T/loop/result.json") == '[70,90]' && $(jq -r .best "$T/loop/result.json") == it1/a1 ]] || fail loop-result
+cmp -s "$T/loop/it1/a1.md" "$T/loop/final.md" || fail loop-final
+has "$T/loop.err" 'it1: CONTINUE 70 (+70) best=a1'
+has "$T/loop/it2/a1.prompt" "$T/loop/best.md"
+has "$T/loop/it2/a1.prompt" 'direction 1'
+has "$T/loop/it2/a1.prompt" 'CHANGES:'
+not_has "$T/loop/it2/a1.prompt" '  read:'
+has "$T/loop/it2/judge.prompt" 'Incumbent (score 70)'
+[[ ! -w $T/loop/best.md ]] || fail best-writable
+# One invalid decision is retried with the reason; the evidence of the first attempt is kept.
+script BAD 'STOP 80 a2 0'
+loop -o "$T/loop-retry" hello >/dev/null 2>&1
+[[ -f $T/loop-retry/it1/judge.attempt1.md ]] || fail judge-attempt-kept
+has "$T/loop-retry/it1/judge.prompt" 'DECISION FORMAT ERROR'
+# STOP with defects and text after the fence are both invalid: rc 65, then resume finishes without rerunning executors.
+script 'STOP 90 a1 0 DEFECTS' 'STOP 90 a1 0 TRAIL' 'STOP 90 a1 0'
+rc_is 65 loop -o "$T/loop-bad" hello
+has "$T/rc.log" 'STOP requires no remaining defects'
+has "$T/rc.log" 'text after the closing'
+[[ $(jq -r .stop_reason "$T/loop-bad/result.json") == judge-failed && ! -f $T/loop-bad/it1/decision.json ]] || fail loop-judge-failed
+before=$(cat "$T/loop-bad"/a/a*/outbox.jsonl | wc -l)
+"$S" resume "$T/loop-bad" >/dev/null 2>&1
+[[ $(cat "$T/loop-bad"/a/a*/outbox.jsonl | wc -l) == "$before" ]] || fail loop-resume-reran
+[[ $(jq .rc "$T/loop-bad/result.json") == 0 && $(jq .ideal "$T/loop-bad/result.json") == true ]] || fail loop-resume
+# judge DIR re-judges the open iteration only.
+script BAD BAD 'PAUSE 40 a1 0'
+rc_is 65 loop -o "$T/loop-judge" hello
+rc_is 4 "$S" judge "$T/loop-judge"
+[[ $(jq -r .stop_reason "$T/loop-judge/result.json") == pause && -s $T/loop-judge/final.md ]] || fail loop-judge-cmd
+# Stagnation: K stalls add the block; CONTINUE without strategy_change is rejected.
+script 'CONTINUE 70 a1 0' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' \
+  'CONTINUE 75 a1 70 STRAT' 'STOP 80 a2 75'
+loop -K 3 -o "$T/loop-stall" hello >/dev/null 2> "$T/loop-stall.err"
+has "$T/loop-stall/it5/judge.attempt1.prompt" 'STAGNATION: no gain for 3 iterations'
+has "$T/loop-stall.err" 'STAGNATION: CONTINUE requires strategy_change'
+not_has "$T/loop-stall/it4/judge.prompt" STAGNATION
+has "$T/loop-stall/it6/a1.prompt" 'Required strategy change: strategy 6'
+has "$T/loop-stall/it6/a1.prompt" 'Already tried without gain'
+# Oscillation: best a1, a2, then a1's identical text again.
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a2 70' 'CONTINUE 80 a1 75' 'STOP 85 INCUMBENT 85'
+loop -o "$T/loop-osc" hello >/dev/null 2>&1
+has "$T/loop-osc/it4/judge.prompt" 'OSCILLATION: best equals it1.'
+not_has "$T/loop-osc/it3/judge.prompt" OSCILLATION
+# No hidden cap: twelve iterations run when the judge keeps improving.
+mapfile -t lines < <(for i in {1..11}; do echo "CONTINUE $((i*5)) a1 $(((i-1)*5))"; done; echo 'STOP 90 INCUMBENT 90')
+script "${lines[@]}"
+loop -m sonnet -o "$T/loop-long" hello >/dev/null 2>&1
+[[ $(wc -l < "$T/loop-long/loop.jsonl") == 12 ]] || fail loop-hidden-cap
+# -I, -B and PAUSE end resumably with rc 4 (never 75).
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70' 'CONTINUE 80 a1 75'
+rc_is 4 loop -I 2 -o "$T/loop-maxit" hello
+[[ $(jq -r .stop_reason "$T/loop-maxit/result.json") == max-iter && $(jq .ideal "$T/loop-maxit/result.json") == false ]] || fail loop-max-iter
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70'
+rc_is 4 loop -B 5 -o "$T/loop-budget" hello
+[[ $(jq -r .stop_reason "$T/loop-budget/result.json") == max-sessions && $(wc -l < "$T/loop-budget/loop.jsonl") == 1 ]] || fail loop-max-sessions
+script 'PAUSE 40 a1 0'
+rc_is 4 loop -o "$T/loop-pause" hello
+# stop DIR during a slow iteration lets it finish, then stops.
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70'
+loop -o "$T/loop-stop" SLOW >/dev/null 2>&1 &
+stop_pid=$!
+for ((i=0; i<300; i++)); do [[ ! -d $T/loop-stop/it1 ]] || break; sleep 0.01; done
+"$S" stop "$T/loop-stop" 2>/dev/null
+stop_rc=0; wait "$stop_pid" || stop_rc=$?
+[[ $stop_rc == 4 && $(jq -r .stop_reason "$T/loop-stop/result.json") == stop && $(wc -l < "$T/loop-stop/loop.jsonl") == 1 ]] || fail "loop-stop rc=$stop_rc"
+# SIGINT reaches loop executors' descendants.
+rm -f "$T/descendant"
+interrupt_rc=0
+timeout --preserve-status -s INT -k 5 1 "$S" loop -m sonnet -S claude-other -o "$T/loop-int" TREE > "$T/loop-int.log" 2>&1 || interrupt_rc=$?
+[[ $interrupt_rc == 130 ]] || fail "loop interrupt exit=$interrupt_rc"
+child=$(cat "$T/descendant")
+[[ ! -d /proc/$child || $(ps -o stat= -p "$child") == Z* ]] || fail loop-interrupt-orphan
+[[ $(cat "$T/loop-int/it1/a1.rc") == 130 && $(jq -r .stop_reason "$T/loop-int/result.json") == interrupted ]] || fail loop-interrupt-state
+# --- v0.5 P1: preview, confirmation gate and mass quorum.
+rc_is 2 "$S" all -r 1 -m 'sonnet@low*21' -S claude-other -o "$T/big" hello
+[[ ! -d $T/big ]] || fail confirm-created-dir
+has "$T/rc.log" 'rerun with -y'
+has "$T/rc.log" 'quorum 13'
+grep -Eq 'sonnet@low +claude +21' "$T/rc.log" || fail preview-table
+"$S" mass -m 'sonnet*13' -S claude-other -o "$T/mass" hello 2> "$T/mass.err" >/dev/null
+[[ $(jq .quorum "$T/mass/run.json") == 8 && $(jq .rounds "$T/mass/run.json") == 1 && ! -d $T/mass/r2 ]] || fail mass-alias
+has "$T/mass.err" '13 agents × 1 rounds + 2 sub-judges + judge = 16 sessions; quorum 8'
+# 100 agents never exceed -j.
+mkdir "$T/conc"
+"$S" all -y -r 1 -j 3 -m 'sonnet*100' -S claude-other -o "$T/hundred" CONC >/dev/null 2>&1
+rm -rf "$T/conc"
+[[ $(sort -n "$T/conc.max" | tail -n 1) -le 3 && $(wc -l < "$T/conc.max") -ge 100 ]] || fail "concurrency peak $(sort -n "$T/conc.max" | tail -n 1)"
+[[ $(cat "$T/hundred"/r1/*.rc | sort -u) == 0 ]] || fail hundred-agents
+# Rate limits: transient errors are retried by the orchestrator and attempts are kept.
+mkdir "$T/noshuf"; printf '#!/bin/sh\nexec cat\n' > "$T/noshuf/shuf"; chmod +x "$T/noshuf/shuf"
+rm -f "$T/rate-hit"
+SWARM_BACKOFF_BASE=0 "$S" all -r 1 -m 'gpt-test sonnet' -S claude-other -o "$T/rate" RATE429 >/dev/null 2>&1
+codex_id=$(awk '$2 == "gpt-test" {print $1}' "$T/rate/anon.map")
+[[ $(cat "$T/rate/r1/$codex_id.attempt1.rc") == 76 && $(cat "$T/rate/r1/$codex_id.rc") == 0 ]] || fail rate-retry
+has "$T/rate/failures.jsonl" '"event":"retry"'
+[[ ! -f $T/rate/PARTIAL ]] || fail retry-marked-partial
+# While Codex cools down, Claude jobs keep launching.
+rm -f "$T/rate-hit" "$T/launches"
+PATH="$T/noshuf:$PATH" SWARM_BACKOFF_BASE=1 "$S" all -r 1 -j 1 -m 'gpt-test*2 sonnet*2' -S claude-other -o "$T/cool" 'RATE429 LAUNCHLOG' >/dev/null 2>&1
+[[ $(grep -n '^claude a3' "$T/launches" | cut -d: -f1) -lt $(grep -n '^codex a2' "$T/launches" | cut -d: -f1) ]] || fail "claude waited for codex cooldown: $(tr '\n' ' ' < "$T/launches")"
+[[ $(grep -c '^codex a1' "$T/launches") == 2 ]] || fail cooldown-retry
+# Exhausted quota (real Codex --json log): rc 77, engine dead, queued agents skipped, quorum honoured.
+PATH="$T/noshuf:$PATH" "$S" all -r 1 -j 1 -q 1 -m 'gpt-test*2 sonnet' -S claude-other -o "$T/exhaust" EXHAUST >/dev/null 2>&1
+[[ $(cat "$T/exhaust/r1/a1.rc") == 77 && $(cat "$T/exhaust/r1/a2.rc") == 77 && $(cat "$T/exhaust/r1/a3.rc") == 0 ]] || fail exhausted-codes
+[[ ! -e $T/exhaust/a/a2/argv && -s $T/exhaust/.backoff/codex.dead ]] || fail exhausted-skip
+has "$T/exhaust/failures.jsonl" '"event":"skip"'
+[[ $(jq .partial "$T/exhaust/result.json") == true && $(jq .rc "$T/exhaust/result.json") == 0 ]] || fail exhausted-partial
+# Only error events count: the same log without them (its tool output mentions 429) stays rc 1.
+reject "$S" all -r 1 -m gpt-test -S claude-other -o "$T/rlitem" RLITEM
+[[ $(cat "$T/rlitem/r1/a1.rc") == 1 ]] || fail rate-from-tool-output
+# A successful answer that talks about rate limits is not classified.
+"$S" all -r 1 -m 'sonnet gpt-test' -S claude-other -o "$T/rltext" RLTEXT >/dev/null 2>&1
+[[ $(cat "$T/rltext/r1"/*.rc | sort -u) == 0 ]] || fail rate-from-answer
+# Overridable pattern; after three requeues the failure stands.
+reject env SWARM_BACKOFF_BASE=0 SWARM_RATELIMIT_RE=custom-throttle "$S" all -r 1 -m sonnet -S claude-other -o "$T/customrl" CUSTOMRL
+[[ $(cat "$T/customrl/r1/a1.rc") == 76 && -f $T/customrl/r1/a1.attempt3.rc && ! -f $T/customrl/r1/a1.attempt4.rc ]] || fail custom-ratelimit
+# -M: the judge may write merged text, but never STOP in that iteration; off by default.
+script 'CONTINUE 80 MERGED 0 MERGE' 'STOP 90 INCUMBENT 90'
+loop -M -o "$T/loop-merge" hello >/dev/null 2>&1
+[[ $(cat "$T/loop-merge/final.md") == 'merged text' && -s $T/loop-merge/it1/merged.md ]] || fail loop-merge
+script 'CONTINUE 80 MERGED 0 MERGE' 'CONTINUE 80 MERGED 0 MERGE'
+rc_is 65 loop -o "$T/loop-nomerge" hello
+has "$T/rc.log" 'MERGED is not enabled'
+script 'STOP 90 MERGED 0 MERGE' 'STOP 90 MERGED 0 MERGE'
+rc_is 65 loop -M -o "$T/loop-stopmerge" hello
+has "$T/rc.log" 'no STOP in the iteration that picks MERGED'
+rc_is 2 loop -M -w -o "$T/loop-mw" hello
+# rw loop: iteration 2 branches from the iteration-1 winner; losers' worktrees go, branches stay.
+script 'CONTINUE 70 a1 0' 'STOP 90 a2 70'
+"$S" loop -w -m 'gpt-test*2' -S claude-other -o "$T/loop-rw" COMMIT > "$T/loop-rw.out" 2>/dev/null
+[[ $(jq -r 'select(.branch == "swarm/loop-rw/i2/a1") | .base' "$T/loop-rw/worktrees.jsonl") == $(git rev-parse swarm/loop-rw/i1/a1) ]] || fail rw-loop-base
+[[ ! -d $(jq -r 'select(.branch == "swarm/loop-rw/i1/a2") | .path' "$T/loop-rw/worktrees.jsonl") ]] || fail rw-loser-worktree
+git show-ref --verify --quiet refs/heads/swarm/loop-rw/i1/a2 || fail rw-loser-branch
+[[ $(jq -r .winner "$T/loop-rw/result.json") == swarm/loop-rw/i2/a2 ]] || fail rw-loop-winner
+has "$T/loop-rw.out" 'git merge -- swarm/loop-rw/i2/a2'
+has "$T/loop-rw/it1/judge.prompt" "$T/loop-rw/it1/a1.diff"
+git -c user.name=Test -c user.email=test@example.com merge -q --ff-only swarm/loop-rw/i2/a2
+"$S" clean "$T/loop-rw" >/dev/null
+[[ -z $(git branch --list 'swarm/loop-rw/*') ]] || fail rw-loop-clean
+# A dirty winner is never accepted.
+script 'CONTINUE 70 a1 0' 'CONTINUE 70 a1 0'
+rc_is 65 "$S" loop -w -m sonnet -S claude-other -o "$T/loop-dirty" DIRTYWIN
+has "$T/rc.log" 'dirty or switched worktree'
+# --- v0.5 P2: ring critique (-r 2 in mass): every answer is read by exactly 4 peers; no board tail.
+"$S" all -y -r 2 -m 'sonnet*7 gpt-test*7' -S claude-other -o "$T/ring" hello >/dev/null 2>&1
+[[ $(jq '[.[] | length] | unique' -c "$T/ring/r2/peers.json") == '[4]' && $(jq length "$T/ring/r2/peers.json") == 14 ]] || fail ring-peers-json
+for id in $(jq -r 'keys[]' "$T/ring/r2/peers.json"); do
+  n=$(for f in "$T/ring"/r2/a*.prompt; do sed -n '/^Peer answers/,/^Failed answer files/p' "$f"; done | grep -c "/r1/$id.md$" || true)
+  [[ $n == 4 ]] || fail "ring: $id read by $n peers"
+done
+not_has "$T/ring/r2/a1.prompt" 'Recent board messages'
+not_has "$T/ring/final.prompt" 'Recent board messages'
+not_has "$T/ring/r2/a1.prompt" '  read:'
+# Tournament: groups of 8 stratified by model@effort; the final judge sees only forwarded answers.
+"$S" all -y -r 1 -m 'sonnet*10 gpt-test*10' -S claude-other -o "$T/tour" hello >/dev/null 2>&1
+[[ $(find "$T/tour/j/L1" -name 'g*.md' | wc -l) == 3 && ! -d $T/tour/j/L2 ]] || fail tournament-groups
+for g in "$T/tour"/j/L1/g*.members; do
+  engines=$(while read -r f; do id=${f##*/}; awk -v id="${id%.md}" '$1 == id {print $2}' "$T/tour/anon.map"; done < "$g" | sort -u | wc -l)
+  [[ $engines == 2 ]] || fail "unmixed group $g"
+done
+valid() { sed -n '/^Valid answer files/,/^Failed answer files/p' "$1" | grep -c '\.md$' || true; }
+[[ $(valid "$T/tour/final.prompt") == 3 ]] || fail tournament-forwarded
+has "$T/tour/final.prompt" "$T/tour/j/L1/g1.md"
+not_has "$T/tour/final.prompt" 'Round-1 answer paths'
+has "$T/tour/j/L1/g1.prompt" 'Board messages from this group only'
+# An invalid sub-judge forwards its whole group, which forces a second level.
+"$S" all -y -r 1 -m 'sonnet*10 gpt-test*10' -S claude-other -o "$T/tour-bad" BADSUB >/dev/null 2>&1
+[[ -d $T/tour-bad/j/L2 && $(valid "$T/tour-bad/final.prompt") == 2 ]] || fail tournament-invalid-group
+has "$T/tour-bad/failures.jsonl" subjudge-invalid
+# Board caps apply to mass runs only.
+for i in {1..20}; do "$S" post "$T/mass" zed "m$i"; done
+rc_is 2 "$S" post "$T/mass" zed m21
+rc_is 2 "$S" post "$T/mass" yan "$(head -c 2100 /dev/zero | tr '\0' x)"
+for i in {1..21}; do "$S" post "$T/all" zed "m$i"; done
+# -X: the wide roster explores in iteration 1 only.
+script 'CONTINUE 70 a1 0' 'STOP 90 a3 70'
+"$S" loop -m 'sonnet gpt-test' -X claude-other@low -S claude-other -o "$T/loop-x" hello >/dev/null 2>&1
+[[ $(find "$T/loop-x/it2" -name 'a*.rc' -printf '%f\n') == a3.rc && -f $T/loop-x/it1/a2.rc ]] || fail loop-refine-roster
+[[ $(jq -r '.agents[] | select(.phase == "refine") | .id' "$T/loop-x/run.json") == a3 && $(wc -l < "$T/loop-x/anon.map") == 3 ]] || fail loop-refine-map
+rc_is 2 "$S" all -X sonnet -m sonnet -S claude-other hello
+# -U: known USD only (stub Claude calls cost 0.1).
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70' 'CONTINUE 80 a1 75'
+rc_is 4 loop -m sonnet -U 0.35 -o "$T/loop-usd" hello
+[[ $(jq -r .stop_reason "$T/loop-usd/result.json") == max-usd && $(wc -l < "$T/loop-usd/loop.jsonl") == 2 ]] || fail loop-max-usd
+# Large runs aggregate status by state.
+"$S" status "$T/hundred" > "$T/hundred.status"
+has "$T/hundred.status" 'STATE COUNT'
+grep -Eq '^done rc=0: [0-9]+$' "$T/hundred.status" || fail status-aggregate
+[[ $(wc -l < "$T/hundred.status") -lt 10 ]] || fail status-too-long
 printf 'All tests passed.\n'
