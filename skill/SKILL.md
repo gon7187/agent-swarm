@@ -63,8 +63,20 @@ Efforts never appear in prompts.
 Every launch prints a plan (spec, engine, count, sessions, quorum; USD is
 `unknown`). Above `SWARM_CONFIRM_OVER` (20) sessions it asks on a TTY; without
 a TTY it exits 2 unless `-y` is given (`-d` passes `-y` to its child). Above
-`SWARM_MASS_AT` (12) agents the default quorum becomes ceil(0.6·N); `-q`
-overrides. `mass` is exactly `all -r 1`.
+`SWARM_MASS_AT` (12) agents the run is a mass run (`run.json` `mass:true`):
+the default quorum becomes ceil(0.6·N) (`-q` overrides); prompts never carry
+the board tail and critics/judges get no `read` command; `-r 2` critique is a
+deterministic ring where every answer is read by exactly `SWARM_PEERS` (4)
+peers (`r2/peers.json`); judging is a tournament: groups of `SWARM_GROUP` (8)
+stratified round-robin by model@effort, each sub-judge
+(`judge-L<n>-g<m>`, files `j/L<n>/g<m>.*`) reads only its group and that
+group's board messages and ends with fenced JSON
+`{"top":[≤SWARM_TOP ids],"minority":[ids]}`; an invalid report forwards its
+whole group; levels repeat until ≤ G answers survive, and the final judge
+reads only the survivors plus every sub-judge report. Exact duplicates are
+judged once (`aN ≡ aM`). `post` is capped at 2 KB per message and 20 messages
+per outbox. `status` aggregates by state above 40 calls. Setting
+`SWARM_MASS_AT=0` forces all of this. `mass` is exactly `all -r 1`.
 
 Rate limits are classified only for failed calls (rc≠0 or Claude `is_error`),
 from Claude error results, Codex `error`/`turn.failed` events and stderr —
@@ -90,14 +102,18 @@ failure exits 65 (`resume` or `judge DIR` continues). STOP requires no
 defects; CONTINUE requires defects and directions. After `-K` (3) stalled
 iterations (gain < 1 or INCUMBENT) the prompt adds STAGNATION and CONTINUE
 needs a new `strategy_change`; a repeated best adds OSCILLATION. There is no
-hidden iteration cap: `-I N` and `-B N` (sessions) are explicit backstops,
-as is `stop DIR`. `-M` lets the judge write merged text between
+hidden iteration cap: `-I N`, `-B N` (sessions) and `-U USD` (known cost
+only; unknown-cost calls are counted, never guessed) are explicit backstops,
+as is `stop DIR`. `-X "specs"` explores with the `-m` roster in iteration 1
+and refines with the `-X` roster afterwards (ids continue after the first
+roster). A mass loop runs the tournament inside each iteration; only the top
+judge decides. `-M` lets the judge write merged text between
 `=== BEST ===`/`=== END BEST ===` (text tasks; never STOP in that iteration).
 `-w` gives each iteration fresh worktrees on `swarm/<run>/i<k>/<id>`
 branched from the current best head; only a clean candidate can be best;
 losing worktrees are removed (branches kept), and after the winner is merged
 `clean DIR` also deletes the losing branches. No automatic merge.
-Loop exit codes: 0 STOP (ideal), 4 PAUSE/`-I`/`-B`/`stop` (resumable),
+Loop exit codes: 0 STOP (ideal), 4 PAUSE/`-I`/`-B`/`-U`/`stop` (resumable),
 65 judge failed, 1 quorum not met, 130/143 signals; never 75.
 Layout: `it<k>/aN.*`, `it<k>/judge.*`, `it<k>/decision.json` (written last:
 the iteration is committed), `loop.jsonl` (one row per iteration),
@@ -120,7 +136,7 @@ Options: `-j` concurrency (6), `-t` timeout seconds (1800, forced kill after
 round (default all), `-w` isolated writable worktrees, `-W` open a watch window,
 `-y` skip the large-run confirmation.
 For `all`: `-r` rounds (2), `-m "specs"` or `-m all`, `-S` judge spec.
-For `loop`: `-S` (required), `-m`, `-K`, `-I`, `-B`, `-M`, `-w`; no `-r`.
+For `loop`: `-S` (required), `-m`, `-K`, `-I`, `-B`, `-U`, `-M`, `-X`, `-w`; no `-r`.
 `-q` tolerates failures only when quorum is met; failed participants drop out
 of subsequent rounds, with their failures retained in `failures.jsonl`;
 reports carry `PARTIAL` and failed paths. Empty/error responses fail. `judge DIR [-S model]` reuses the

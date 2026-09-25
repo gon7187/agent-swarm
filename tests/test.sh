@@ -99,6 +99,12 @@ if [[ ${SWARM_AGENT_DIR##*/} == judge && $prompt == *'You are the loop judge'* ]
     [[ ${x:-} != TRAIL ]] || answer+=$'\ntrailing prose'
   fi
 fi
+# Tournament sub-judges forward the first listed answer; BADSUB breaks group L1-g1.
+if [[ ${SWARM_AGENT_DIR##*/} == judge-L* ]]; then
+  first=$(grep -m1 -E '^/.*\.md$' <<< "$prompt"); first=${first##*/}
+  answer=$'Group verdict.\n```json\n{"top":["'"${first%.md}"$'"],"minority":[]}\n```'
+  [[ $prompt != *BADSUB* || ${SWARM_AGENT_DIR##*/} != judge-L1-g1 ]] || answer='no report'
+fi
 if [[ $prompt == *EMPTY* || ( $prompt == *MIXED* && $model == gpt-test ) ]]; then
   if [[ $engine == claude ]]; then echo '{"result":"","total_cost_usd":0.1}'; else : > "$out"; fi
 elif [[ $engine == claude ]]; then
@@ -534,7 +540,7 @@ has "$T/rc.log" 'quorum 13'
 grep -Eq 'sonnet@low +claude +21' "$T/rc.log" || fail preview-table
 "$S" mass -m 'sonnet*13' -S claude-other -o "$T/mass" hello 2> "$T/mass.err" >/dev/null
 [[ $(jq .quorum "$T/mass/run.json") == 8 && $(jq .rounds "$T/mass/run.json") == 1 && ! -d $T/mass/r2 ]] || fail mass-alias
-has "$T/mass.err" '13 agents × 1 rounds + judge = 14 sessions; quorum 8'
+has "$T/mass.err" '13 agents × 1 rounds + 2 sub-judges + judge = 16 sessions; quorum 8'
 # 100 agents never exceed -j.
 mkdir "$T/conc"
 "$S" all -y -r 1 -j 3 -m 'sonnet*100' -S claude-other -o "$T/hundred" CONC >/dev/null 2>&1
@@ -596,4 +602,50 @@ git -c user.name=Test -c user.email=test@example.com merge -q --ff-only swarm/lo
 script 'CONTINUE 70 a1 0' 'CONTINUE 70 a1 0'
 rc_is 65 "$S" loop -w -m sonnet -S claude-other -o "$T/loop-dirty" DIRTYWIN
 has "$T/rc.log" 'dirty or switched worktree'
+# --- v0.5 P2: ring critique (-r 2 in mass): every answer is read by exactly 4 peers; no board tail.
+"$S" all -y -r 2 -m 'sonnet*7 gpt-test*7' -S claude-other -o "$T/ring" hello >/dev/null 2>&1
+[[ $(jq '[.[] | length] | unique' -c "$T/ring/r2/peers.json") == '[4]' && $(jq length "$T/ring/r2/peers.json") == 14 ]] || fail ring-peers-json
+for id in $(jq -r 'keys[]' "$T/ring/r2/peers.json"); do
+  n=$(for f in "$T/ring"/r2/a*.prompt; do sed -n '/^Peer answers/,/^Failed answer files/p' "$f"; done | grep -c "/r1/$id.md$" || true)
+  [[ $n == 4 ]] || fail "ring: $id read by $n peers"
+done
+not_has "$T/ring/r2/a1.prompt" 'Recent board messages'
+not_has "$T/ring/final.prompt" 'Recent board messages'
+not_has "$T/ring/r2/a1.prompt" '  read:'
+# Tournament: groups of 8 stratified by model@effort; the final judge sees only forwarded answers.
+"$S" all -y -r 1 -m 'sonnet*10 gpt-test*10' -S claude-other -o "$T/tour" hello >/dev/null 2>&1
+[[ $(find "$T/tour/j/L1" -name 'g*.md' | wc -l) == 3 && ! -d $T/tour/j/L2 ]] || fail tournament-groups
+for g in "$T/tour"/j/L1/g*.members; do
+  engines=$(while read -r f; do id=${f##*/}; awk -v id="${id%.md}" '$1 == id {print $2}' "$T/tour/anon.map"; done < "$g" | sort -u | wc -l)
+  [[ $engines == 2 ]] || fail "unmixed group $g"
+done
+valid() { sed -n '/^Valid answer files/,/^Failed answer files/p' "$1" | grep -c '\.md$' || true; }
+[[ $(valid "$T/tour/final.prompt") == 3 ]] || fail tournament-forwarded
+has "$T/tour/final.prompt" "$T/tour/j/L1/g1.md"
+not_has "$T/tour/final.prompt" 'Round-1 answer paths'
+has "$T/tour/j/L1/g1.prompt" 'Board messages from this group only'
+# An invalid sub-judge forwards its whole group, which forces a second level.
+"$S" all -y -r 1 -m 'sonnet*10 gpt-test*10' -S claude-other -o "$T/tour-bad" BADSUB >/dev/null 2>&1
+[[ -d $T/tour-bad/j/L2 && $(valid "$T/tour-bad/final.prompt") == 2 ]] || fail tournament-invalid-group
+has "$T/tour-bad/failures.jsonl" subjudge-invalid
+# Board caps apply to mass runs only.
+for i in {1..20}; do "$S" post "$T/mass" zed "m$i"; done
+rc_is 2 "$S" post "$T/mass" zed m21
+rc_is 2 "$S" post "$T/mass" yan "$(head -c 2100 /dev/zero | tr '\0' x)"
+for i in {1..21}; do "$S" post "$T/all" zed "m$i"; done
+# -X: the wide roster explores in iteration 1 only.
+script 'CONTINUE 70 a1 0' 'STOP 90 a3 70'
+"$S" loop -m 'sonnet gpt-test' -X claude-other@low -S claude-other -o "$T/loop-x" hello >/dev/null 2>&1
+[[ $(find "$T/loop-x/it2" -name 'a*.rc' -printf '%f\n') == a3.rc && -f $T/loop-x/it1/a2.rc ]] || fail loop-refine-roster
+[[ $(jq -r '.agents[] | select(.phase == "refine") | .id' "$T/loop-x/run.json") == a3 && $(wc -l < "$T/loop-x/anon.map") == 3 ]] || fail loop-refine-map
+rc_is 2 "$S" all -X sonnet -m sonnet -S claude-other hello
+# -U: known USD only (stub Claude calls cost 0.1).
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70' 'CONTINUE 80 a1 75'
+rc_is 4 loop -m sonnet -U 0.35 -o "$T/loop-usd" hello
+[[ $(jq -r .stop_reason "$T/loop-usd/result.json") == max-usd && $(wc -l < "$T/loop-usd/loop.jsonl") == 2 ]] || fail loop-max-usd
+# Large runs aggregate status by state.
+"$S" status "$T/hundred" > "$T/hundred.status"
+has "$T/hundred.status" 'STATE COUNT'
+grep -Eq '^done rc=0: [0-9]+$' "$T/hundred.status" || fail status-aggregate
+[[ $(wc -l < "$T/hundred.status") -lt 10 ]] || fail status-too-long
 printf 'All tests passed.\n'
