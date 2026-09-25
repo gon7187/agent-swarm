@@ -88,16 +88,16 @@ subjudge_count() {
 preview() {
   local -n pm=$1 pe=$2
   local i key
-  local -A n=()
+  local -A counts=()
   local -a order=()
   for i in "${!pm[@]}"; do
     key=${pm[$i]}${pe[$i]:+@${pe[$i]}}
-    [[ ${n[$key]+x} ]] || order+=("$key")
-    n[$key]=$((${n[$key]:-0} + 1))
+    [[ ${counts[$key]+x} ]] || order+=("$key")
+    counts[$key]=$((${counts[$key]:-0} + 1))
   done
   {
     printf 'swarm: %-32s %-7s %s\n' SPEC ENGINE COUNT
-    for key in "${order[@]}"; do printf 'swarm: %-32s %-7s %s\n' "$key" "$(engine_of "${key%@*}")" "${n[$key]}"; done
+    for key in "${order[@]}"; do printf 'swarm: %-32s %-7s %s\n' "$key" "$(engine_of "${key%@*}")" "${counts[$key]}"; done
     printf 'swarm: judge %s%s\n' "$synth" "${synth_effort:+@$synth_effort}"
   } >&2
 }
@@ -112,13 +112,13 @@ limit_kind() {
 }
 # .backoff/<engine> holds "<retry-after epoch> <consecutive hits>"; delay min(900, BASE*2^n) + jitter.
 backoff() {
-  local f=$dir/.backoff/$1 n=0 base=${SWARM_BACKOFF_BASE:-30} delay
+  local f=$dir/.backoff/$1 hits=0 base=${SWARM_BACKOFF_BASE:-30} delay
   mkdir -p "$dir/.backoff"
-  [[ ! -f $f ]] || read -r _ n < "$f" || true
-  ((n <= 10)) || n=10
-  delay=$((base * (1 << n))); ((delay <= 900)) || delay=900
+  [[ ! -f $f ]] || read -r _ hits < "$f" || true
+  ((hits <= 10)) || hits=10
+  delay=$((base * (1 << hits))); ((delay <= 900)) || delay=900
   ((base == 0)) || delay=$((delay + RANDOM % (base + 1)))
-  echo "$(($(date +%s) + delay)) $((n + 1))" > "$f"
+  echo "$(($(date +%s) + delay)) $((hits + 1))" > "$f"
 }
 cooling() {
   local after=0
@@ -253,7 +253,7 @@ cleanup() {
     kill -KILL "${victims[@]}" 2>/dev/null || true
     wait || true
   fi
-  local jrc=${judge_rc_file:-$dir/final.rc}
+  local jrc=${judge_rc_file:-${dir:-}/final.rc} # dir is unset when validation fails before the run starts
   if [[ ${judge_lock:-0} == 1 && -f $jrc && $(cat "$jrc") == running ]]; then
     echo 130 > "$jrc"
   fi
@@ -544,6 +544,7 @@ subjudge_prompt() {
   board_json "$dir" | jq -r --argjson ids "$ids" '.[] | select(.from as $f | any($ids[]; . == $f)) | "[\(.ts)] \(.from) -> \(.to): \(.msg)"' | tail -n 40
   printf 'Forward the best 1-%s answers on the merits as "top"; list answers holding a distinct, possibly correct minority position as "minority".\n' "${SWARM_TOP:-2}"
   echo 'End with exactly one fenced ```json block, nothing after it, e.g.:'
+  # shellcheck disable=SC2016 # literal JSON example, nothing to expand
   printf '```json\n{"top":["a1"],"minority":[]}\n```\n'
 }
 # Forwarded answer paths of a valid sub-judge report; nothing if invalid.
@@ -562,7 +563,7 @@ subjudge_top() {
 # An invalid report forwards its whole group. Sets ok to the survivors and tournament_note.
 tournament() {
   local jdir=$1 level=0 n g i f id sha G=${SWARM_GROUP:-8} note=''
-  local -a pool=() next members out
+  local -a pool=() next members tops
   local -A first=()
   for f in "${ok[@]}"; do
     sha=$(sha "$f"); id=${f##*/}
@@ -582,8 +583,8 @@ tournament() {
     next=()
     for ((g=1; g<=n; g++)); do
       mapfile -t members < "$jdir/L$level/g$g.members"
-      mapfile -t out < <(subjudge_top "$jdir/L$level/g$g.md" "${members[@]}")
-      if ((${#out[@]})); then next+=("${out[@]}")
+      mapfile -t tops < <(subjudge_top "$jdir/L$level/g$g.md" "${members[@]}")
+      if ((${#tops[@]})); then next+=("${tops[@]}")
       else
         echo "swarm: sub-judge L$level-g$g report invalid; its whole group advances" >&2
         log_event subjudge-invalid "$jdir/L$level/g$g.md" "$(cat "$jdir/L$level/g$g.rc")" 'whole group forwarded'
@@ -743,7 +744,7 @@ stash_attempt() {
   while [[ -e $base.attempt$n.rc ]]; do ((n++)); done
   for s in prompt md log stderr usage rc diff; do [[ ! -e $base.$s ]] || mv "$base.$s" "$base.attempt$n.$s"; done
 }
-stall_count() { jq -s 'reduce .[] as $r (0; if $r.stalled then . + 1 else 0 end)' "$dir/loop.jsonl" 2>/dev/null || echo 0; }
+stall_count() { [[ -s $dir/loop.jsonl ]] || { echo 0; return; }; jq -s 'reduce .[] as $r (0; if $r.stalled then . + 1 else 0 end)' "$dir/loop.jsonl"; }
 # Directions handed out before an iteration that then made no gain.
 tried_directions() {
   local i
@@ -791,11 +792,12 @@ loop_judge_prompt() {
   ((merge == 0)) || echo 'Text tasks only: best may be "MERGED" if you write the merged answer between lines "=== BEST ===" and "=== END BEST ===" before the JSON; never STOP in the same iteration.'
   echo 'Fields: verdict STOP|CONTINUE|PAUSE; score (chosen best, 0-100); incumbent_score; best "INCUMBENT" or a candidate id; defects (material defects left in best; empty only for STOP); directions; strategy_change ("" unless required).'
   echo 'End with exactly one fenced ```json block, nothing after it, e.g.:'
+  # shellcheck disable=SC2016 # literal JSON example, nothing to expand
   printf '```json\n{"verdict":"CONTINUE","score":82,"incumbent_score":78,"best":"a3","defects":["..."],"directions":["..."],"strategy_change":""}\n```\n'
 }
 prior_strategies() {
-  local -a f=("$dir"/it*/decision.json)
-  if ((${#f[@]})); then jq -s '[.[].strategy_change // "" | select(test("\\S"))]' "${f[@]}"; else echo '[]'; fi
+  local -a decs=("$dir"/it*/decision.json)
+  if ((${#decs[@]})); then jq -s '[.[].strategy_change // "" | select(test("\\S"))]' "${decs[@]}"; else echo '[]'; fi
 }
 # Prints why the judge answer is not a valid decision; writes decision.json.tmp.
 decision_error() {
@@ -912,7 +914,7 @@ finish_loop() {
   if [[ -f $dir/best.md ]]; then cp -f "$dir/best.md" "$dir/final.md.tmp"; mv -f "$dir/final.md.tmp" "$dir/final.md"; chmod u+w "$dir/final.md"; fi
   [[ $mode != rw || ! -s $dir/loop.jsonl ]] || winner=$(tail -n 1 "$dir/loop.jsonl" | jq -r '.best_branch // ""')
   status "$dir"; branches
-  echo "loop: $stop_reason after $(jq -s length "$dir/loop.jsonl" 2>/dev/null || echo 0) iterations" >&2
+  echo "loop: $stop_reason after $(if [[ -s $dir/loop.jsonl ]]; then jq -s length "$dir/loop.jsonl"; else echo 0; fi) iterations" >&2
   [[ ! -s $dir/final.md ]] || echo "final: $dir/final.md"
   exit "$1"
 }
