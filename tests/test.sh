@@ -15,7 +15,7 @@ set -euo pipefail
 engine=${0##*/}
 if [[ ${1:-} == debug ]]; then
   [[ ! -e $TEST_ROOT/discovery-fail ]] || exit 1
-  echo '[{"slug":"gpt-test","visibility":"list"},{"slug":"hidden","visibility":"hide"}]'; exit
+  echo '[{"slug":"gpt-test","visibility":"list","supported_reasoning_efforts":[{"effort":"low"},{"effort":"high"}]},{"slug":"hidden","visibility":"hide"}]'; exit
 fi
 printf '%s\n' "$@" > "$SWARM_AGENT_DIR/argv"
 out='' prompt='' model='' root=''
@@ -52,7 +52,7 @@ fi
 if [[ ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-no-output ]]; then
   exit 0
 fi
-answer='FINAL ANSWER (complete, standalone): harness answer'
+answer="FINAL ANSWER (complete, standalone): harness answer from ${SWARM_AGENT_DIR##*/}"
 [[ $prompt != *NOFINAL* ]] || answer='incomplete answer'
 [[ $prompt != *MDHEADING* ]] || answer=$'Analysis first.\n\n## **FINAL ANSWER**\nharness answer'
 [[ $prompt != *INLINEFINAL* ]] || answer='this merely mentions a FINAL ANSWER inline'
@@ -63,6 +63,22 @@ if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
     [[ $prompt != *BADWINNER* ]] || winner=invalid
     [[ $prompt != *NOWINNER* ]] || winner=NONE
     answer+=$'\nWINNER: '"$winner"
+  fi
+fi
+# Loop judge: each call consumes the next judge-script line "VERDICT SCORE BEST [INCUMBENT_SCORE] [BAD|DEFECTS|STRAT|MERGE|TRAIL]".
+if [[ ${SWARM_AGENT_DIR##*/} == judge && $prompt == *'You are the loop judge'* ]]; then
+  n=$(( $(cat "$TEST_ROOT/judge-n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$TEST_ROOT/judge-n"
+  v='' s='' b='' i='' x=''
+  read -r v s b i x < <(sed -n "${n}p" "$TEST_ROOT/judge-script") || true
+  if [[ $v == BAD ]]; then answer='no decision here'
+  else
+    json=$(jq -cn --arg v "$v" --argjson s "$s" --arg b "$b" --argjson i "${i:-0}" --arg x "${x:-}" --arg n "$n" '{verdict:$v,score:$s,incumbent_score:$i,best:$b,
+      defects:(if $v == "STOP" and $x != "DEFECTS" then [] else ["defect \($n)"] end),
+      directions:(if $v == "STOP" then [] else ["direction \($n)"] end),
+      strategy_change:(if $x == "STRAT" then "strategy \($n)" else "" end)}')
+    answer=$'Judgment.\n```json\n'"$json"$'\n```'
+    [[ ${x:-} != MERGE ]] || answer=$'=== BEST ===\nmerged text\n=== END BEST ===\n'"$answer"
+    [[ ${x:-} != TRAIL ]] || answer+=$'\ntrailing prose'
   fi
 fi
 if [[ $prompt == *EMPTY* || ( $prompt == *MIXED* && $model == gpt-test ) ]]; then
@@ -124,7 +140,8 @@ not_has "$T/run space/a/two/argv" --add-dir
 has <("$S" watch "$T/run space") bound
 "$S" all -r 2 -o "$T/all" hello 2> "$T/all-launch"
 has "$T/all-launch" '2 agents × 2 rounds + judge = 5 sessions'
-[[ $(jq -r .judge "$T/all/run.json") == claude-other ]] || fail independent-judge
+[[ $(jq -r .judge.model "$T/all/run.json") == claude-other ]] || fail independent-judge
+[[ $(jq -r .kind "$T/all/run.json") == all ]] || fail run-kind
 [[ -s $T/all/r2/a1.md && -s $T/all/final.md ]] || fail all
 [[ $(jq -s length "$T/all"/a/*/outbox.jsonl) == 10 ]] || fail rounds
 has "$T/all/a/a1/prompt" 'REFUTED (claim'
@@ -390,4 +407,104 @@ rm .git/hooks/pre-commit
 # Judge receives only the newest manifest snapshots and their diffs.
 not_has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r1/a1.diff"
 has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r2/a1.diff"
+# --- v0.5: model[@effort][*count] specs.
+rc_is() { local want=$1 rc=0; shift; "$@" >"$T/rc.log" 2>&1 || rc=$?; [[ $rc == "$want" ]] || fail "rc $rc (want $want): $*"; }
+"$S" all -r 1 -m 'sonnet@xhigh gpt-test@high' -S claude-other@low -o "$T/effort" hello >/dev/null
+grep -A1 -Fx -- --effort "$T/effort"/a/a*/argv | grep -Fq xhigh || fail claude-effort
+has <(cat "$T/effort"/a/a*/argv) model_reasoning_effort=high
+[[ $(grep -A1 -Fx -- --effort "$T/effort/a/judge/argv" | tail -n 1) == low ]] || fail judge-effort
+has "$T/effort/anon.map" $'\tsonnet\txhigh'
+[[ $(jq -r '.judge.effort' "$T/effort/run.json") == low && $(jq -r '[.agents[].effort] | sort | join(",")' "$T/effort/run.json") == high,xhigh ]] || fail effort-run-json
+for spec in gpt-test@ultra 'sonnet*0' a@b@c 'sonnet@low sonnet@low' sonnet@huge; do
+  rc_is 2 "$S" all -r 1 -m "$spec" -S claude-other -o "$T/badspec" hello
+  [[ ! -d $T/badspec ]] || fail "bad spec created a run dir: $spec"
+done
+has "$T/rc.log" 'invalid effort'
+rc_is 2 "$S" all -r 1 -m sonnet -S 'claude-other*2' -o "$T/badspec" hello
+"$S" all -r 1 -m 'sonnet@low*3 sonnet@high' -S claude-other -o "$T/count" hello >/dev/null
+[[ $(grep -c $'\tsonnet\tlow$' "$T/count/anon.map") == 3 && $(wc -l < "$T/count/anon.map") == 4 ]] || fail spec-count
+# --- v0.5: read-only loop. The stub judge replays $T/judge-script, one line per call.
+script() { rm -f "$T/judge-n"; printf '%s\n' "$@" > "$T/judge-script"; }
+loop() { "$S" loop -m 'sonnet gpt-test' -S claude-other "$@"; }
+rc_is 2 "$S" loop -m sonnet hello
+rc_is 2 "$S" loop -r 2 -m sonnet -S claude-other hello
+rc_is 2 "$S" loop -w -m sonnet -S claude-other hello
+rc_is 2 "$S" all -I 3 -m sonnet -S claude-other hello
+rc_is 2 "$S" stop "$T/all"
+script 'CONTINUE 70 a1 0' 'STOP 90 INCUMBENT 90'
+loop -o "$T/loop" hello > "$T/loop.out" 2> "$T/loop.err"
+[[ $(wc -l < "$T/loop/loop.jsonl") == 2 && $(jq .ideal "$T/loop/result.json") == true && $(jq -r .kind "$T/loop/run.json") == loop ]] || fail loop-basic
+[[ $(jq -c .score_history "$T/loop/result.json") == '[70,90]' && $(jq -r .best "$T/loop/result.json") == it1/a1 ]] || fail loop-result
+cmp -s "$T/loop/it1/a1.md" "$T/loop/final.md" || fail loop-final
+has "$T/loop.err" 'it1: CONTINUE 70 (+70) best=a1'
+has "$T/loop/it2/a1.prompt" "$T/loop/best.md"
+has "$T/loop/it2/a1.prompt" 'direction 1'
+has "$T/loop/it2/a1.prompt" 'CHANGES:'
+not_has "$T/loop/it2/a1.prompt" '  read:'
+has "$T/loop/it2/judge.prompt" 'Incumbent (score 70)'
+[[ ! -w $T/loop/best.md ]] || fail best-writable
+# One invalid decision is retried with the reason; the evidence of the first attempt is kept.
+script BAD 'STOP 80 a2 0'
+loop -o "$T/loop-retry" hello >/dev/null 2>&1
+[[ -f $T/loop-retry/it1/judge.attempt1.md ]] || fail judge-attempt-kept
+has "$T/loop-retry/it1/judge.prompt" 'DECISION FORMAT ERROR'
+# STOP with defects and text after the fence are both invalid: rc 65, then resume finishes without rerunning executors.
+script 'STOP 90 a1 0 DEFECTS' 'STOP 90 a1 0 TRAIL' 'STOP 90 a1 0'
+rc_is 65 loop -o "$T/loop-bad" hello
+has "$T/rc.log" 'STOP requires no remaining defects'
+has "$T/rc.log" 'text after the closing'
+[[ $(jq -r .stop_reason "$T/loop-bad/result.json") == judge-failed && ! -f $T/loop-bad/it1/decision.json ]] || fail loop-judge-failed
+before=$(cat "$T/loop-bad"/a/a*/outbox.jsonl | wc -l)
+"$S" resume "$T/loop-bad" >/dev/null 2>&1
+[[ $(cat "$T/loop-bad"/a/a*/outbox.jsonl | wc -l) == "$before" ]] || fail loop-resume-reran
+[[ $(jq .rc "$T/loop-bad/result.json") == 0 && $(jq .ideal "$T/loop-bad/result.json") == true ]] || fail loop-resume
+# judge DIR re-judges the open iteration only.
+script BAD BAD 'PAUSE 40 a1 0'
+rc_is 65 loop -o "$T/loop-judge" hello
+rc_is 4 "$S" judge "$T/loop-judge"
+[[ $(jq -r .stop_reason "$T/loop-judge/result.json") == pause && -s $T/loop-judge/final.md ]] || fail loop-judge-cmd
+# Stagnation: K stalls add the block; CONTINUE without strategy_change is rejected.
+script 'CONTINUE 70 a1 0' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' 'CONTINUE 70 INCUMBENT 70' \
+  'CONTINUE 75 a1 70 STRAT' 'STOP 80 a2 75'
+loop -K 3 -o "$T/loop-stall" hello >/dev/null 2> "$T/loop-stall.err"
+has "$T/loop-stall/it5/judge.attempt1.prompt" 'STAGNATION: no gain for 3 iterations'
+has "$T/loop-stall.err" 'STAGNATION: CONTINUE requires strategy_change'
+not_has "$T/loop-stall/it4/judge.prompt" STAGNATION
+has "$T/loop-stall/it6/a1.prompt" 'Required strategy change: strategy 6'
+has "$T/loop-stall/it6/a1.prompt" 'Already tried without gain'
+# Oscillation: best a1, a2, then a1's identical text again.
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a2 70' 'CONTINUE 80 a1 75' 'STOP 85 INCUMBENT 85'
+loop -o "$T/loop-osc" hello >/dev/null 2>&1
+has "$T/loop-osc/it4/judge.prompt" 'OSCILLATION: best equals it1.'
+not_has "$T/loop-osc/it3/judge.prompt" OSCILLATION
+# No hidden cap: twelve iterations run when the judge keeps improving.
+mapfile -t lines < <(for i in {1..11}; do echo "CONTINUE $((i*5)) a1 $(((i-1)*5))"; done; echo 'STOP 90 INCUMBENT 90')
+script "${lines[@]}"
+loop -m sonnet -o "$T/loop-long" hello >/dev/null 2>&1
+[[ $(wc -l < "$T/loop-long/loop.jsonl") == 12 ]] || fail loop-hidden-cap
+# -I, -B and PAUSE end resumably with rc 4 (never 75).
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70' 'CONTINUE 80 a1 75'
+rc_is 4 loop -I 2 -o "$T/loop-maxit" hello
+[[ $(jq -r .stop_reason "$T/loop-maxit/result.json") == max-iter && $(jq .ideal "$T/loop-maxit/result.json") == false ]] || fail loop-max-iter
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70'
+rc_is 4 loop -B 5 -o "$T/loop-budget" hello
+[[ $(jq -r .stop_reason "$T/loop-budget/result.json") == max-sessions && $(wc -l < "$T/loop-budget/loop.jsonl") == 1 ]] || fail loop-max-sessions
+script 'PAUSE 40 a1 0'
+rc_is 4 loop -o "$T/loop-pause" hello
+# stop DIR during a slow iteration lets it finish, then stops.
+script 'CONTINUE 70 a1 0' 'CONTINUE 75 a1 70'
+loop -o "$T/loop-stop" SLOW >/dev/null 2>&1 &
+stop_pid=$!
+for ((i=0; i<300; i++)); do [[ ! -d $T/loop-stop/it1 ]] || break; sleep 0.01; done
+"$S" stop "$T/loop-stop" 2>/dev/null
+stop_rc=0; wait "$stop_pid" || stop_rc=$?
+[[ $stop_rc == 4 && $(jq -r .stop_reason "$T/loop-stop/result.json") == stop && $(wc -l < "$T/loop-stop/loop.jsonl") == 1 ]] || fail "loop-stop rc=$stop_rc"
+# SIGINT reaches loop executors' descendants.
+rm -f "$T/descendant"
+interrupt_rc=0
+timeout --preserve-status -s INT -k 5 1 "$S" loop -m sonnet -S claude-other -o "$T/loop-int" TREE > "$T/loop-int.log" 2>&1 || interrupt_rc=$?
+[[ $interrupt_rc == 130 ]] || fail "loop interrupt exit=$interrupt_rc"
+child=$(cat "$T/descendant")
+[[ ! -d /proc/$child || $(ps -o stat= -p "$child") == Z* ]] || fail loop-interrupt-orphan
+[[ $(cat "$T/loop-int/it1/a1.rc") == 130 && $(jq -r .stop_reason "$T/loop-int/result.json") == interrupted ]] || fail loop-interrupt-state
 printf 'All tests passed.\n'
