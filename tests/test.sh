@@ -5,7 +5,7 @@ S=$(realpath "$(dirname "$0")/../skill/swarm.sh")
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 export SWARM_DEPTH=0
-unset SWARM_AGENT_DIR SWARM_INHERIT_CONFIG SWARM_UNSAFE_RW SWARM_RW_ALLOW
+unset SWARM_AGENT_DIR SWARM_INHERIT_CONFIG SWARM_UNSAFE_RW SWARM_RW_ALLOW SWARM_RO_ALLOW SWARM_DETACHED_DIR
 export SWARM_CLAUDE_BIN="$T/claude" SWARM_CODEX_BIN="$T/codex"
 export SWARM_CLAUDE_MODELS='sonnet claude-other' SWARM_CODEX_MODELS='gpt-test gpt-other'
 export TEST_ROOT=$T
@@ -14,19 +14,21 @@ cat > "$T/harness" <<'STUB'
 set -euo pipefail
 engine=${0##*/}
 if [[ ${1:-} == debug ]]; then
+  [[ ! -e $TEST_ROOT/discovery-fail ]] || exit 1
   echo '[{"slug":"gpt-test","visibility":"list"},{"slug":"hidden","visibility":"hide"}]'; exit
 fi
 printf '%s\n' "$@" > "$SWARM_AGENT_DIR/argv"
 out='' prompt='' model='' root=''
 while (($#)); do
   case $1 in
-    -p) prompt=$2; shift 2 ;;
+    -p) shift ;;
     -m|--model) model=$2; shift 2 ;;
     -o) out=$2; shift 2 ;;
     -C) root=$2; shift 2 ;;
     *) [[ $1 != *'You are agent'* ]] || prompt=$1; shift ;;
   esac
 done
+prompt=$(cat)
 printf '%s\n' "$prompt" > "$SWARM_AGENT_DIR/prompt"
 [[ $engine != codex || ( $PWD == "$root" && $root == "$SWARM_AGENT_DIR" ) ]] || exit 88
 read_cmd=$(sed -n 's/^  read:  //p' <<< "$prompt")
@@ -43,21 +45,31 @@ fi
 if [[ $prompt == *COMMIT* && $engine == codex ]]; then
   project=$(sed -n 's/.*Project dir: //p' <<< "$prompt" | head -1)
   common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir)
-  grep -Fxq -- "$common" "$SWARM_AGENT_DIR/argv" || exit 89
+  if grep -Fxq -- "$common" "$SWARM_AGENT_DIR/argv"; then exit 89; fi
   printf '%s\n' "$SWARM_AGENT_DIR" >> "$project/worker.txt"
-  git -C "$project" add -- worker.txt
-  git -C "$project" -c user.name=Test -c user.email=test@example.com commit -qm worker
+  if [[ $prompt == *SWITCH* ]]; then git -C "$project" switch -qc switched; fi
 fi
 if [[ ${SWARM_AGENT_DIR##*/} == judge && -e $TEST_ROOT/judge-no-output ]]; then
   exit 0
+fi
+answer='FINAL ANSWER (complete, standalone): harness answer'
+[[ $prompt != *NOFINAL* ]] || answer='incomplete answer'
+if [[ ${SWARM_AGENT_DIR##*/} == judge ]]; then
+  run_dir=${SWARM_AGENT_DIR%/a/judge}
+  if [[ -f $run_dir/worktrees.jsonl ]]; then
+    winner=$(jq -r .branch "$run_dir/worktrees.jsonl" | head -1)
+    [[ $prompt != *BADWINNER* ]] || winner=invalid
+    [[ $prompt != *NOWINNER* ]] || winner=NONE
+    answer+=$'\nWINNER: '"$winner"
+  fi
 fi
 if [[ $prompt == *EMPTY* || ( $prompt == *MIXED* && $model == gpt-test ) ]]; then
   if [[ $engine == claude ]]; then echo '{"result":"","total_cost_usd":0.1}'; else : > "$out"; fi
 elif [[ $engine == claude ]]; then
   if [[ $prompt == *APIERROR* ]]; then echo '{"result":"error","is_error":true}'
-  else echo '{"result":"Claude answer","is_error":false,"total_cost_usd":0.1,"usage":{"input_tokens":10}}'; fi
+  else jq -cn --arg answer "$answer" '{result:$answer,is_error:false,total_cost_usd:0.1,usage:{input_tokens:10}}'; fi
 else
-  printf 'Codex answer\n' > "$out"
+  printf '%s\n' "$answer" > "$out"
   echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}'
   echo '{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":3}}'
 fi
@@ -72,7 +84,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 reject() { if "$@" >"$T/reject.log" 2>&1; then fail "accepted: $*"; fi; }
 has() { local contents; contents=$(cat "$1"); grep -Fq -- "$2" <<< "$contents" || fail "missing $2 in $1"; }
 not_has() { local contents; contents=$(cat "$1"); if grep -Fq -- "$2" <<< "$contents"; then fail "unexpected $2 in $1"; fi; }
-[[ $("$S" version) == 0.3.0 ]] || fail version
+[[ $("$S" version) == 0.4.0 ]] || fail version
 has <("$S" --help) 'watch DIR'
 [[ $("$S" roster | wc -l) == 4 ]] || fail roster
 [[ $(env -u SWARM_CODEX_MODELS "$S" roster | tail -1) == gpt-test ]] || fail discovery
@@ -98,7 +110,7 @@ has <("$S" status "$T/run space") 'unknown'
 [[ ! -e $T/spoof ]] || fail spoofed-dir
 [[ $(jq -r .from "$T/run space/a/two/outbox.jsonl" | sort -u) == two ]] || fail spoofed-author
 [[ $(jq .usage.input_tokens "$T/run space/two.usage") == 30 ]] || fail usage
-has "$T/run space/a/one/argv" --safe-mode
+not_has "$T/run space/a/one/argv" --safe-mode
 has "$T/run space/a/one/argv" --strict-mcp-config
 has "$T/run space/a/one/argv" 'Bash(git blame:*)'
 not_has "$T/run space/a/one/argv" 'Bash(rg:'
@@ -171,7 +183,7 @@ has "$T/work/a/judge/prompt" 'WINNER: <branch>'
 for f in "$T/work"/a/a*/argv; do
   not_has "$f" --dangerously-skip-permissions
   if grep -Fq -- --permission-mode "$f"; then has "$f" acceptEdits
-  else has "$f" "$T/project space/.git"; fi
+  else not_has "$f" "$T/project space/.git"; fi
 done
 "$S" clean "$T/work"
 [[ $(git worktree list --porcelain | grep -c '^worktree ') == 1 ]] || fail clean
@@ -273,4 +285,103 @@ rm "$T/judge-tree"
 # No CLI flag is allowed to silently upgrade an explicit read-only request.
 printf '%s\n' '{"id":"reader","model":"sonnet","prompt":"hello","mode":"ro"}' > "$T/ro.jsonl"
 reject "$S" run -w "$T/ro.jsonl"
+# Malformed outbox lines preserve valid messages.
+printf '{broken\n' >> "$T/board/a/alice/outbox.jsonl"
+has <("$S" read "$T/board") broadcast
+has <("$S" status "$T/run space") 'TOKENS(in/out)=30/5'
+# Failed participants are not retried; round-1 evidence and failures reach judge.
+[[ ! -e $T/partial/r2/$failed_id.rc ]] || fail retried-failure
+has "$T/partial/a/judge/prompt" "$T/partial/r1/$failed_id.md"
+has "$T/partial/failures.jsonl" '65'
+reject "$S" all -r 2 -m sonnet -S claude-other -o "$T/no-final" NOFINAL
+[[ $(cat "$T/no-final/r2/a1.rc") == 65 ]] || fail missing-final-section
+# Discovery is nonfatal and explicit participant + judge bypass it.
+touch "$T/discovery-fail"
+env -u SWARM_CODEX_MODELS "$S" all -r 1 -m sonnet -S claude-other -o "$T/explicit" hello >/dev/null
+env -u SWARM_CODEX_MODELS "$S" all -r 1 -o "$T/discovery" hello >/dev/null
+rm "$T/discovery-fail"
+reject "$S" all -m unknown -o "$T/unknown" hello
+[[ ! -d $T/unknown ]] || fail unknown-created-dir
+# Defaults, subdirectory worktrees, and orchestrator identity.
+mkdir -p sub
+printf keep > sub/keep
+git add -- sub/keep
+git -c user.name=Test -c user.email=test@example.com commit -qm sub
+jq -cn --arg dir "$PWD/sub" '{id:"default",prompt:"COMMIT",engine:"codex",worktree:true,dir:$dir}' > "$T/default.jsonl"
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$S" run -o "$T/default" "$T/default.jsonl" >/dev/null
+has "$T/default/a/default/prompt" '/sub'
+[[ $(jq '.autocommitted | length' "$T/default/manifest.jsonl") == 1 ]] || fail autocommitted-paths
+[[ $(git -C "$(jq -r .path "$T/default/worktrees.jsonl")" log -1 --format=%an) == swarm ]] || fail identity
+"$S" clean "$T/default" --discard swarm/default/default >/dev/null
+for kind in FAIL SWITCH; do
+  jq -cn --arg p "COMMIT $kind" '{id:"writer",model:"gpt-test",prompt:$p,worktree:true}' > "$T/edit.jsonl"
+  reject "$S" run -o "$T/edit-$kind" "$T/edit.jsonl"
+  [[ $(jq -r '.base == .head' "$T/edit-$kind/manifest.jsonl") == true ]] || fail committed-failed-worker
+  [[ $(jq -r '.dirty != ""' "$T/edit-$kind/manifest.jsonl") == true ]] || fail lost-edits
+done
+[[ $(cat "$T/edit-SWITCH/writer.rc") == 71 ]] || fail branch-switch-code
+reject "$S" all -w -r 1 -m sonnet -S claude-other -o "$T/bad-winner" BADWINNER
+[[ $(jq .winner "$T/bad-winner/result.json") == null ]] || fail invalid-winner
+"$S" all -w -r 1 -m sonnet -S claude-other -o "$T/no-winner" NOWINNER >/dev/null
+[[ $(jq .winner "$T/no-winner/result.json") == null ]] || fail none-winner
+# Prompt exceeds Linux's per-argument limit; only stdin reaches either harness.
+jq -cn '{id:"long",model:"gpt-test",prompt:("x" * 150000)}, {id:"long-claude",model:"sonnet",prompt:("x" * 150000)}' > "$T/long.jsonl"
+"$S" run -o "$T/long" "$T/long.jsonl" >/dev/null
+[[ $(wc -c < "$T/long/long.prompt") -gt 150000 ]] || fail long-prompt
+SWARM_RO_ALLOW='Bash(pytest:*)' "$S" all -r 1 -m sonnet -S claude-other -o "$T/ro-allow" hello >/dev/null
+has "$T/ro-allow/a/a1/argv" 'Bash(pytest:*)'
+"$S" all -d -r 1 -m sonnet -S claude-other -o "$T/detached" SLOW
+wait_rc=0
+"$S" wait "$T/detached" || wait_rc=$?
+[[ $wait_rc == 75 ]] || fail wait-running
+"$S" wait "$T/detached" -t 30
+[[ $(jq .rc "$T/detached/result.json") == 0 ]] || fail detached-result
+[[ -s $T/detached/orchestrator.log ]] || fail detached-log
+wait_rc=0
+"$S" wait "$T/failed" || wait_rc=$?
+[[ $wait_rc != 0 && $wait_rc != 75 ]] || fail wait-failure
+# Resume retries only unfinished calls and keeps successful rounds.
+touch "$T/fail-judge"
+reject "$S" all -r 2 -m sonnet -S claude-other -o "$T/resume" hello
+before=$(wc -l < "$T/resume/a/a1/outbox.jsonl")
+rm "$T/fail-judge"
+"$S" resume "$T/resume" >/dev/null
+[[ $(wc -l < "$T/resume/a/a1/outbox.jsonl") == "$before" ]] || fail resume-reran-success
+[[ $(jq .rc "$T/resume/result.json") == 0 ]] || fail resume-judge
+for changed in task.md anon.map run.json; do
+  cp "$T/resume/$changed" "$T/hash-backup"
+  if [[ $changed == run.json ]]; then jq '.rounds = 3' "$T/hash-backup" > "$T/resume/$changed"
+  else echo changed >> "$T/resume/$changed"; fi
+  reject "$S" resume "$T/resume"
+  cp "$T/hash-backup" "$T/resume/$changed"
+done
+# Remove one answer's rc to model interruption; only that worker is replayed.
+rm "$T/resume/result.json" "$T/resume/r2/a1.rc"
+"$S" resume "$T/resume" >/dev/null
+[[ $(wc -l < "$T/resume/a/a1/outbox.jsonl") == $((before+2)) ]] || fail resume-missing-rc
+# Reusing a worktree on a changed branch is rejected even for a completed run.
+wt=$(jq -r .path "$T/no-winner/worktrees.jsonl")
+git -C "$wt" switch -qc resume-switched
+reject "$S" resume "$T/no-winner"
+# Same recorded branch name with unrelated history is also unsafe.
+recorded=$(jq -r .branch "$T/no-winner/worktrees.jsonl")
+git -C "$wt" checkout -q --orphan unrelated
+git -C "$wt" -c user.name=Test -c user.email=test@example.com commit --allow-empty -qm unrelated
+git -C "$wt" branch -D "$recorded" >/dev/null
+git -C "$wt" branch -m "$recorded"
+reject "$S" resume "$T/no-winner"
+printf '%s\n' '{"id":"unknown","model":"missing","prompt":"hello"}' > "$T/unknown.jsonl"
+reject "$S" run -o "$T/unknown-run" "$T/unknown.jsonl"
+[[ ! -d $T/unknown-run ]] || fail unknown-run-created-dir
+# Commit hook failure must propagate rc 71 and preserve staged work.
+printf '#!/bin/sh\nexit 1\n' > .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+jq -cn '{id:"writer",model:"gpt-test",prompt:"COMMIT",worktree:true}' > "$T/hook.jsonl"
+reject "$S" run -o "$T/hook" "$T/hook.jsonl"
+rm .git/hooks/pre-commit
+[[ $(cat "$T/hook/writer.rc") == 71 ]] || fail commit-failure-code
+[[ $(jq -r '.dirty != ""' "$T/hook/manifest.jsonl") == true ]] || fail commit-failure-lost-edits
+# Judge receives only the newest manifest snapshots and their diffs.
+not_has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r1/a1.diff"
+has "$T/commit-rounds/a/judge/prompt" "$T/commit-rounds/r2/a1.diff"
 printf 'All tests passed.\n'
