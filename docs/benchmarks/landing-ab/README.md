@@ -17,13 +17,13 @@ The resulting sites are in [`sites/`](sites/) exactly as committed by the agents
 ## Result
 
 **B (opus solo) wins.** The swarm's judge also picked the opus worker, so C is "opus + a critique round",
-which added sales polish for ~4× the cost and ~2× the time.
+which added sales polish for ~5× the cost and ~2× the time.
 
 | | A — astra solo | B — opus solo | C — swarm |
 |---|---|---|---|
 | Brand invented | FLOE One | Ondine Glide S1 | Tidewell Glide 3 |
 | Wall time | 19m31s | **12m36s** | 22m42s (r1 12m14s, r2 2m56s, judge 7m32s) |
-| Cost | unknown (Codex; 1.13M in / 37k out tokens) | **$2.91** | $10.82 Claude share + Codex unknown |
+| Cost (USD) | $3.71 (OpenAI API prices) | **$2.91** | $15.13 ($10.82 Claude + $4.31 OpenAI) |
 | Page transfer / requests | **71 KB / 7** | 868 KB / 12 | 864 KB / 14 |
 | Console errors | 0 | 0 | 0 |
 | Horizontal overflow at 375 / 768 / 1440 | none | none | none |

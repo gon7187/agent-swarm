@@ -1,0 +1,5 @@
+Bug hunt in this repository (a small async HTTP client core for the Wildberries API: token-bucket rate limiter, retrying httpx transport, typed errors, rate presets). The source is in src/wb_api_client_core/. There are no tests in the repo.
+
+Find as many REAL defects as you can: logic errors, off-by-one, wrong constants, concurrency/timing bugs, deadlocks, incorrect retry/rate-limit behaviour, mismatches between code and its own docstrings/comments, edge cases that break. Do not report style issues or mere suggestions. Do not modify the repository. You may run Python to verify a hypothesis (e.g. `.venv/bin/python -c ...` or a scratch script outside the repo); a demonstrated failure beats a guess.
+
+Output: a numbered list. For each bug: `file:line`, one-sentence defect, concrete failure scenario (input/state -> wrong result), severity (high/medium/low), confidence (high/medium/low), and whether you verified it by running code. Precision matters: false positives are penalised as much as misses are rewarded.
