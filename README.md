@@ -441,7 +441,7 @@ Deliberately not planned: automatic merging of the `WINNER`, stopping early on a
 - [docs/architecture.md](docs/architecture.md): engines, sandboxing per engine, run layout, including `loop` and `mass` directories.
 - [docs/recipes.md](docs/recipes.md): architecture review, hard-bug hunt, parallel feature in worktrees, research, second-opinion code review, polishing to ideal with `loop`, mass exploration with `mass`.
 - [docs/benchmarks/landing-ab](docs/benchmarks/landing-ab/README.md): benchmark, solo `gpt-6-astra` vs solo `claude-opus-5-5` vs a 4-model swarm on a 3D landing page, with scores and screenshots.
-- [docs/benchmarks/bughunt-ab](docs/benchmarks/bughunt-ab/README.md): swarm configurations A/B on a seeded bug hunt: solo models vs 16 identical cheap workers (with three different judges) vs the full 11-model roster, with recall, cost and a per-model breakdown.
+- [docs/benchmarks/bughunt-ab](docs/benchmarks/bughunt-ab/README.md): swarm configurations A/B on a seeded bug hunt: solo models vs 16 identical cheap workers (with three different judges) vs the full 11-model roster vs a two-model `xhigh` duo with a strong judge, with recall, cost and a per-model breakdown.
 
 ## License
 
