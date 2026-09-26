@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+const root = new URL('../', import.meta.url);
+const html = readFileSync(new URL('index.html', root), 'utf8');
+for (const id of ['how-it-works', 'reviews', 'shop', 'faq']) assert(html.includes(`id="${id}"`), `Missing ${id}`);
+for (const [, file] of html.matchAll(/(?:src|href)="((?!https?:|#|mailto:)[^"?]+)"/g)) assert(existsSync(new URL(file, root)), `Missing ${file}`);
+assert(html.includes('<dialog'), 'Offer must provide a working dialog');
+assert(html.includes('type="range"'), 'Comparison must be keyboard accessible');
+assert(readFileSync(new URL('styles.css', root), 'utf8').includes('prefers-reduced-motion'));
+assert(readFileSync(new URL('scene.js', root), 'utf8').includes('getContext(\'webgl\''), 'Real WebGL required');
+console.log('PASS: page sections, local assets, offer dialog, comparison control, reduced motion, real WebGL');
