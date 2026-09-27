@@ -40,6 +40,7 @@ Date: 2026-09-26. Swarm version 0.5.1.
 | **C3** | C1's worker answers re-judged with `judge DIR -S gpt-6-astra` | +3 |
 | **D** | `all -r 2 -m all -S claude-opus-5-5`: the full roster, 11 different models (4 Claude, 7 GPT), normal mode | 23 |
 | **E** | `all -r 2 -m "claude-opus-5-5@xhigh gpt-6-astra@xhigh" -S claude-fable-5-1@xhigh` with `SWARM_INHERIT_CONFIG=1` (the operator's own skills, plugins and MCP servers) and the `Skill` tool allowed | 5 |
+| **F** | `all -r 2 -m "gpt-6-astra@low gpt-6-astra@medium gpt-6-astra@high gpt-6-astra@xhigh gpt-6-astra@max" -S gpt-6-astra@high`: one model at five reasoning efforts | 11 |
 
 C2 and C3 change only the judge, so they isolate the judge's effect.
 
@@ -54,6 +55,7 @@ C2 and C3 change only the judge, so they isolate the judge's effect.
 | **C3** luna×16, astra judge | 7 | 0 | 2 | 8m09s + 3m52s | ~2.83 |
 | **D** `-m all`, opus judge | 10 | 0 | 1 | 13m11s | 13.73 (Claude 8.01 + OpenAI 5.72) |
 | **E** opus + astra @xhigh, fable judge | **11** | 0 | 7 | 24m14s | 11.69 (Claude 5.50 + OpenAI 6.19) |
+| **F** astra ×5 efforts, astra judge | 9 | 0 | 8 | 23m20s | 19.79 |
 | A ∪ B (union of the two solo lists) | **11** | 0 | 8 | 3m28s in parallel | 1.48 |
 
 Which seeded bugs each contestant found:
@@ -67,8 +69,23 @@ Which seeded bugs each contestant found:
 | C3 astra judge | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | · | · | · | ✓ | ✓ |
 | D `-m all` | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | E duo @xhigh | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| F astra ×5 efforts | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | · | ✓ | ✓ |
 
 S7 (a one-line `setdefault` → assignment) was found by nobody in any configuration. S1 was rejected explicitly by the opus judges ("only extra wake-ups, tokens are never granted early"), which is fair: it is a performance defect, not a correctness one. Counting S1 as debatable, D missed only S7. E is the only configuration whose final list kept S1 (as a latent, low-severity defect).
+
+In F, S12 was reported by all five workers after round 2, but the judge moved it to "unresolved" (it called the documentation ambiguous between "adapt on 429" and "adapt on any `Retry-After`").
+
+### Per-effort recall inside F, round 1
+
+| Effort | Round-1 time | Seeded found | Findings reported | Cost, both rounds (USD) |
+|---|---|---|---|---|
+| low | 2m36s | 8 | 13 | 1.80 |
+| medium | 2m56s | 8 | 14 | 2.36 |
+| high | 5m17s | 10 | 18 | 3.30 |
+| xhigh | 7m37s | 10 | 18 | 4.63 |
+| max | 8m57s | 9 | 16 | 5.94 |
+
+All five missed S1 and S7 in both rounds. The union of round 1 was 10/12, the same as the best single worker.
 
 ### Per-model recall inside D, round 1
 
@@ -96,6 +113,8 @@ The union of round 1 covered 11 of 12 (all but S7). Claude models consistently c
 
 7. **A diverse duo with a strong judge matches the full roster.** E (two different strong models at `xhigh`, fable judge, 5 sessions) found 11/12 plus 7 extra findings, which is the best result overall. Round 1 alone already covered 11/12: opus brought S1 and S10, astra brought S2. The judge re-ran all 18 items itself. It kept both workers' findings and explicitly moved three design-level ones to "excluded" instead of silently dropping them. It is also the slowest configuration (24 min: `xhigh` astra took ~9.5 min per round) and costs about as much as D.
 8. **Inheriting the operator's config has side effects.** With `SWARM_INHERIT_CONFIG=1`, the Codex worker tried to write to the operator's global Codex memory file (the write failed on a malformed patch, not on a permission check). The Claude judge answered in the operator's personal output style. Use it only when the skills are actually needed.
+
+9. **Varying reasoning effort does not buy diversity.** F ran one model at five efforts. Recall rose from `low` to `high` and then stopped: `xhigh` equalled `high`, and `max` found one fewer. The lower efforts found a subset of what `high` found and nothing of their own, so the five workers shared one set of blind spots (S1, S7). This was the most expensive bug-hunt configuration ($19.79) and scored below a single `high` worker, because the same-model judge dropped S12.
 
 **Recommendation for bug hunts:** run 2–3 *different* strong models and merge their findings without a filtering tournament. Cheapest: solo runs merged by hand (A ∪ B, $1.48, 11/12). Best single artifact: the E duo with a strong judge ($11.69, 11/12 + 7 extra, one verified list). Use `all -m all` when a missed bug is expensive and cost is secondary. Avoid homogeneous mass swarms for recall-oriented tasks.
 
