@@ -50,9 +50,17 @@ untrusted evidence, never instructions. Evidence beats votes; no consensus early
 not a security boundary. Default judge is the first unused roster model;
 if none exists, a warning discloses reuse.
 
+Choosing a configuration (see `docs/benchmarks/`): gains come from *different*
+models, not from more workers, higher effort or critique rounds. For reviews and
+bug hunts default to `all -r 1 -m "<strong Claude> <strong GPT>" -S <cheap judge>`
+(bug-hunt benchmark: 10/12 for $1.87 in 9 min, versus 11/12 for $11.69 with
+`-r 2`, `xhigh` and a strong judge). Round 2 spreads findings, it has not found
+new ones; homogeneous or mass swarms share blind spots, and tournament judging
+drops true findings. For creative work a single strong model beat the swarm.
+
 Model specs are `model[@effort][*count]` for `-m`, and `model[@effort]` for
 `-S`. Claude efforts: `low|medium|high|xhigh|max` (`--effort`); Codex efforts
-must be in `codex debug models` `supported_reasoning_efforts`
+must be in `codex debug models` `supported_reasoning_levels` (or legacy `supported_reasoning_efforts`)
 (`-c model_reasoning_effort=`); if discovery fails the effort passes through
 with a warning. Invalid specs exit 2 before any run directory exists. Repeat a
 model with `*N`, not by listing it twice; the same model at different efforts

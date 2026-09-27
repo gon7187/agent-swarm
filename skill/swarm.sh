@@ -56,7 +56,7 @@ check_effort() {
     return 0
   fi
   [[ ${codex_json+x} ]] || codex_json=$("$CODEX" debug models 2>/dev/null) || codex_json=''
-  efforts=$(jq -r --arg m "$1" '[.. | objects | select(.slug? == $m) | .supported_reasoning_efforts[]? | .effort? // .] | unique | join(" ")' <<< "$codex_json" 2>/dev/null) || efforts=''
+  efforts=$(jq -r --arg m "$1" '[.. | objects | select(.slug? == $m) | (.supported_reasoning_efforts[]?, .supported_reasoning_levels[]?) | .effort? // .] | unique | join(" ")' <<< "$codex_json" 2>/dev/null) || efforts=''
   if [[ -z $efforts ]]; then echo "swarm: warning: cannot verify effort $2 for $1; passing it through" >&2
   elif [[ " $efforts " != *" $2 "* ]]; then die "unsupported effort for $1: $2 (supported: $efforts)"; fi
 }

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 720" width="420" height="720">
+  <title>Ondine Glide S1</title>
+  <defs>
+    <linearGradient id="body" x1="0" x2="1">
+      <stop offset="0" stop-color="#1a2c3a"/><stop offset=".45" stop-color="#3b5566"/><stop offset="1" stop-color="#0f1c26"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="0" x2="1">
+      <stop offset="0" stop-color="#cfdcdf"/><stop offset=".4" stop-color="#ffffff"/><stop offset="1" stop-color="#9fb2b8"/>
+    </linearGradient>
+    <linearGradient id="clean" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b8fff6" stop-opacity=".9"/><stop offset="1" stop-color="#1fb7bf" stop-opacity=".9"/>
+    </linearGradient>
+    <linearGradient id="glass" x1="0" x2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".35"/><stop offset=".3" stop-color="#ffffff" stop-opacity=".05"/><stop offset="1" stop-color="#ffffff" stop-opacity=".2"/>
+    </linearGradient>
+    <linearGradient id="dirty" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8d7b66" stop-opacity=".7"/><stop offset="1" stop-color="#4d3f31" stop-opacity=".9"/>
+    </linearGradient>
+    <radialGradient id="shadow" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#000" stop-opacity=".55"/><stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <ellipse cx="210" cy="688" rx="190" ry="22" fill="url(#shadow)"/>
+  <!-- handle -->
+  <path d="M196 170 V60 q0-34 34-34 h20" fill="none" stroke="url(#body)" stroke-width="22" stroke-linecap="round"/>
+  <rect x="224" y="14" width="64" height="26" rx="13" fill="#5ef0e0"/>
+  <rect x="186" y="96" width="30" height="88" rx="12" fill="url(#shell)"/>
+  <!-- display ring -->
+  <rect x="150" y="176" width="120" height="40" rx="20" fill="#0c1822"/>
+  <ellipse cx="210" cy="196" rx="46" ry="12" fill="none" stroke="#5ef0e0" stroke-width="4"/>
+  <text x="210" y="201" font-family="Manrope, Arial, sans-serif" font-size="13" font-weight="700" fill="#e9fffd" text-anchor="middle">87%</text>
+  <!-- clean tank -->
+  <rect x="150" y="214" width="120" height="150" rx="26" fill="#0c1822"/>
+  <rect x="158" y="222" width="104" height="134" rx="22" fill="url(#glass)" stroke="#9fe" stroke-opacity=".35"/>
+  <path d="M160 258 q25 -8 50 0 t50 0 V336 q0 18 -18 18 H178 q-18 0 -18 -18Z" fill="url(#clean)"/>
+  <circle cx="190" cy="300" r="4" fill="#fff" opacity=".7"/><circle cx="230" cy="320" r="3" fill="#fff" opacity=".6"/><circle cx="214" cy="280" r="2.5" fill="#fff" opacity=".6"/>
+  <!-- body -->
+  <rect x="150" y="360" width="120" height="30" rx="8" fill="url(#shell)"/>
+  <!-- dirty tank -->
+  <rect x="156" y="388" width="108" height="130" rx="24" fill="#0c1822"/>
+  <rect x="164" y="396" width="92" height="114" rx="20" fill="url(#glass)" stroke="#9fe" stroke-opacity=".25"/>
+  <path d="M166 470 q22 -6 44 0 t44 0 V492 q0 16 -16 16 H182 q-16 0 -16 -16Z" fill="url(#dirty)"/>
+  <rect x="150" y="516" width="120" height="44" rx="18" fill="url(#body)"/>
+  <!-- neck -->
+  <circle cx="210" cy="576" r="22" fill="url(#shell)" stroke="#0c1822" stroke-width="4"/>
+  <!-- head -->
+  <rect x="30" y="580" width="360" height="74" rx="30" fill="url(#body)"/>
+  <rect x="42" y="592" width="336" height="10" rx="5" fill="#5ef0e0" opacity=".9"/>
+  <rect x="24" y="630" width="372" height="42" rx="21" fill="url(#shell)"/>
+  <g stroke="#9fb2b8" stroke-width="2" opacity=".6">
+    <line x1="60" y1="636" x2="52" y2="668"/><line x1="100" y1="636" x2="92" y2="668"/><line x1="140" y1="636" x2="132" y2="668"/><line x1="180" y1="636" x2="172" y2="668"/><line x1="220" y1="636" x2="212" y2="668"/><line x1="260" y1="636" x2="252" y2="668"/><line x1="300" y1="636" x2="292" y2="668"/><line x1="340" y1="636" x2="332" y2="668"/><line x1="380" y1="636" x2="372" y2="668"/>
+  </g>
+</svg>

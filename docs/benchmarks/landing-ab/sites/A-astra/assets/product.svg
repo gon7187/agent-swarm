@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 760" fill="none">
+<defs>
+<linearGradient id="white" x1="0" y1="0" x2="1" y2=".25"><stop stop-color="#a9b0a4"/><stop offset=".28" stop-color="#f9faf6"/><stop offset=".56" stop-color="#f2f4ed"/><stop offset="1" stop-color="#aeb7a5"/></linearGradient>
+<linearGradient id="metal"><stop stop-color="#717c68"/><stop offset=".3" stop-color="#e3e8dc"/><stop offset=".55" stop-color="#f8faf4"/><stop offset=".8" stop-color="#abb59f"/><stop offset="1" stop-color="#75826a"/></linearGradient>
+<linearGradient id="dark" x1="0" y1="0" x2="1" y2=".3"><stop stop-color="#242b26"/><stop offset=".4" stop-color="#505b4e"/><stop offset="1" stop-color="#20281f"/></linearGradient>
+<linearGradient id="tank" x1="0" y1="0" x2="1" y2=".3"><stop stop-color="#646e5d"/><stop offset=".25" stop-color="#8c9682"/><stop offset=".7" stop-color="#46533d"/><stop offset="1" stop-color="#343e2e"/></linearGradient>
+<linearGradient id="roller" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#e0ebc7"/><stop offset=".4" stop-color="#c4d98c"/><stop offset=".7" stop-color="#afc777"/><stop offset="1" stop-color="#75924b"/></linearGradient>
+<linearGradient id="head" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fcfdf8"/><stop offset=".6" stop-color="#dce2d4"/><stop offset="1" stop-color="#a2af96"/></linearGradient>
+<filter id="shadow" x="-50%" width="200%" y="-50%" height="200%"><feGaussianBlur stdDeviation="8"/></filter>
+<pattern id="fibers" width="8" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(25)"><path d="M0 0v20" stroke="#edf6d2" stroke-width="2" opacity=".6"/></pattern>
+</defs>
+<ellipse cx="248" cy="699" rx="120" ry="15" fill="#3c4d2c" opacity=".16" filter="url(#shadow)"/>
+<g transform="rotate(14 250 630)">
+<path d="M213 86c0-26 15-43 37-43h17c23 0 35 15 35 38v97c0 24-16 40-35 40h-22v-24h19c9 0 14-7 14-16V83c0-10-4-15-13-15h-12c-10 0-15 7-15 19v91h-25z" fill="url(#dark)"/>
+<path d="M215 81c0-19 12-32 30-34" stroke="#6a7664" stroke-width="3" stroke-linecap="round"/>
+<rect x="217" y="160" width="25" height="278" rx="12" fill="url(#metal)"/>
+<rect x="219" y="178" width="21" height="29" rx="8" fill="#374332"/>
+<rect x="225" y="185" width="8" height="12" rx="4" fill="#d6f266"/>
+<path d="M198 353c0-28 14-43 39-43 27 0 43 20 43 49v197c0 24-14 47-41 47-27 0-41-19-41-46z" fill="url(#dark)"/>
+<path d="M208 333c0-21 10-29 31-29s34 18 34 41v206c0 25-13 40-33 40s-32-17-32-40z" fill="url(#white)"/>
+<path d="M182 407c0-29 23-46 52-46h14c29 0 49 15 49 43v130c0 34-18 51-51 51h-15c-32 0-49-19-49-52z" fill="url(#white)"/>
+<rect x="191" y="424" width="99" height="145" rx="36" fill="url(#tank)"/>
+<path d="M202 453v73c0 17 4 24 14 27" stroke="#e3ecdb" stroke-opacity=".27" stroke-width="4" stroke-linecap="round"/>
+<path d="M196 511c28 5 54-6 89 0v19c0 23-14 32-43 32-29 0-46-12-46-33z" fill="#a7b986" opacity=".18"/>
+<path d="M203 426h74" stroke="#c6d4b8" stroke-opacity=".45"/>
+<rect x="214" y="549" width="48" height="6" rx="3" fill="#303b29"/>
+<ellipse cx="240" cy="396" rx="26" ry="22" fill="#202c24"/><ellipse cx="240" cy="396" rx="19" ry="16" stroke="#b9d773" stroke-width="1.4"/>
+<text x="240" y="400" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" fill="#e0f6b2">100</text>
+<text x="240" y="348" text-anchor="middle" font-family="Arial,sans-serif" font-weight="bold" letter-spacing="-1.5" font-size="21" fill="#56624c">floe</text>
+<rect x="219" y="580" width="40" height="73" rx="17" fill="url(#dark)"/>
+<path d="M223 599v27" stroke="#6c7961" stroke-width="3"/>
+<path d="M126 637c1-13 13-21 27-21h166c18 0 30 9 30 23v40c0 12-10 19-25 19H149c-15 0-26-7-26-20z" fill="url(#dark)"/>
+<path d="M123 637c0-15 11-26 27-29l147-5c20 0 33 6 39 21l12 36c2 9-5 19-17 19H139c-13 0-20-7-18-19z" fill="url(#head)"/>
+<path d="M145 631h161c13 0 23 12 23 26v6H132v-9c0-13 3-23 13-23z" fill="#526047"/>
+<rect x="141" y="639" width="180" height="25" rx="11" fill="url(#roller)"/>
+<rect x="141" y="639" width="180" height="25" rx="11" fill="url(#fibers)"/>
+<path d="M140 670h183" stroke="#eff3e9" stroke-width="3" stroke-linecap="round"/>
+<path d="M150 618h42" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+<text x="299" y="623" font-family="Arial,sans-serif" font-size="11" letter-spacing="-1" fill="#707e63">floe</text>
+<rect x="123" y="673" width="11" height="15" rx="4" fill="#3c4737"/><rect x="332" y="672" width="10" height="15" rx="4" fill="#3c4737"/>
+</g>
+</svg>

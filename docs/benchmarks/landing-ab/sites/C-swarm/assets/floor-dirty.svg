@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <pattern id="t" width="160" height="160" patternUnits="userSpaceOnUse">
+      <rect width="160" height="160" fill="#8f8a78"/>
+      <rect x="2" y="2" width="156" height="156" fill="#c9c3ad"/>
+      <path d="M2 2h156v156" fill="none" stroke="#6f6a5a" stroke-width="4"/>
+    </pattern>
+    <filter id="blur"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="noise"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" seed="4"/><feColorMatrix values="0 0 0 0 .35  0 0 0 0 .28  0 0 0 0 .18  0 0 0 .5 0"/></filter>
+  </defs>
+  <rect width="800" height="600" fill="url(#t)"/>
+  <rect width="800" height="600" filter="url(#noise)" opacity=".7"/>
+  <g filter="url(#blur)" fill="none" stroke="#7a6a4c" stroke-linecap="round" opacity=".55">
+    <path d="M-20 140c120 60 260-40 420 20s300 20 420-30" stroke-width="40"/>
+    <path d="M-20 330c160 40 250-60 420-10s260 60 420 0" stroke-width="30"/>
+    <path d="M-20 500c140-30 300 40 440 0s260-40 400 10" stroke-width="36"/>
+  </g>
+  <g fill="#6b4a2a" opacity=".75">
+    <ellipse cx="180" cy="230" rx="54" ry="30" filter="url(#blur)"/>
+    <ellipse cx="560" cy="420" rx="70" ry="36" filter="url(#blur)" fill="#8a3b22"/>
+    <ellipse cx="640" cy="170" rx="30" ry="18" filter="url(#blur)"/>
+  </g>
+  <g fill="#e2b560">
+    <circle cx="120" cy="420" r="6"/><circle cx="140" cy="440" r="4"/><circle cx="300" cy="380" r="5"/>
+    <circle cx="420" cy="120" r="6"/><circle cx="460" cy="520" r="5"/><circle cx="700" cy="300" r="6"/><circle cx="250" cy="90" r="4"/>
+  </g>
+  <g fill="none" stroke="#3b3024" stroke-width="2" opacity=".6">
+    <path d="M330 250q20 10 30-6"/><path d="M600 260q14 12 26 0"/><path d="M90 540q20-8 34 4"/>
+  </g>
+  <g fill="#4a3a2a" opacity=".35">
+    <ellipse cx="380" cy="470" rx="16" ry="10"/><ellipse cx="404" cy="452" rx="6" ry="5"/><ellipse cx="392" cy="444" rx="6" ry="5"/><ellipse cx="370" cy="446" rx="6" ry="5"/>
+    <ellipse cx="480" cy="300" rx="16" ry="10"/><ellipse cx="504" cy="282" rx="6" ry="5"/><ellipse cx="492" cy="274" rx="6" ry="5"/><ellipse cx="470" cy="276" rx="6" ry="5"/>
+  </g>
+</svg>

@@ -1,0 +1,117 @@
+diff
+--- a/src/wb_api_client_core/errors.py	2026-06-23 21:35:08.014315444 +0300
++++ b/src/wb_api_client_core/errors.py	2026-09-26 12:50:57.819933376 +0300
+@@ -76,7 +76,7 @@
+ _HTTP_SERVER_ERROR_MIN = 500
+ _HTTP_SERVER_ERROR_END = 600  # exclusive — 5xx only; 600+ are not valid HTTP
+ _AUTH_STATUSES = frozenset({401, 403})
+-_VALIDATION_STATUSES = frozenset({400, 422})
++_VALIDATION_STATUSES = frozenset({400})
+ 
+ 
+ def from_status_code(code: int) -> type[WBClientError]:
+diff
+--- a/src/wb_api_client_core/ratelimit.py	2026-06-23 21:34:58.130318946 +0300
++++ b/src/wb_api_client_core/ratelimit.py	2026-09-26 12:50:57.819846304 +0300
+@@ -86,7 +86,7 @@
+         mid = min(end, he) - max(start, hs)  # half rate within the window
+         if mid > 0.0:
+             total += mid * half_rate
+-        post = end - max(start, he)  # full rate after the window
++        post = end - max(start, hs)  # full rate after the window
+         if post > 0.0:
+             total += post * self._base_rate
+         return total
+@@ -103,9 +103,9 @@
+         """Try to take one token without blocking. Returns False if paused/empty."""
+         async with self._lock:
+             t = self._now()
+-            if t < self._s.paused_until:
+-                return False
+             self._refill()
++            if t <= self._s.paused_until:
++                return False
+             if self._s.tokens >= 1.0:
+                 self._s.tokens -= 1.0
+                 return True
+@@ -119,10 +119,10 @@
+                 wait_for = max(0.0, self._s.paused_until - t)
+                 if wait_for == 0.0:
+                     self._refill()
+-                    if self._s.tokens >= 1.0:
++                    if self._s.tokens > 1.0:
+                         self._s.tokens -= 1.0
+                         return
+-                    rate = self.effective_rate
++                    rate = self._base_rate
+                     wait_for = max(_MIN_SLEEP_SEC, (1.0 - self._s.tokens) / rate)
+             await asyncio.sleep(wait_for)
+ 
+@@ -137,6 +137,6 @@
+         """
+         self._refill()  # settle [last_refill, now] under the window in force now
+         t = self._now()
+-        self._s.paused_until = max(self._s.paused_until, t + max(0.0, seconds))
++        self._s.paused_until = t + max(0.0, seconds)
+         self._s.half_start = t
+         self._s.half_until = t + _ADAPTIVE_WINDOW_SEC
+diff
+--- a/src/wb_api_client_core/rates.py	2026-06-23 21:11:03.505380960 +0300
++++ b/src/wb_api_client_core/rates.py	2026-09-26 12:50:57.819415820 +0300
+@@ -61,7 +61,7 @@
+     "promotion": {
+         "default": ("5/s", 5),
+         "statistics": ("1/m", 1),
+-        "fullstats": ("3/m", 1),  # /adv/v3/fullstats — 3 req/min, burst 1
++        "fullstats": ("3/s", 1),  # /adv/v3/fullstats — 3 req/min, burst 1
+         "normquery": ("1/s", 1),  # conservative; WB-documented 5/s burst 10
+         "auction_nms": ("1/s", 1),
+         "auction_placements": ("1/s", 1),
+diff
+--- a/src/wb_api_client_core/transport.py	2026-06-23 21:29:09.470439105 +0300
++++ b/src/wb_api_client_core/transport.py	2026-09-26 12:50:57.819751186 +0300
+@@ -31,7 +31,7 @@
+ from .ratelimit import TokenBucket
+ from .rates import WB_BASE_URLS, RateConfig, wb_bucket
+ 
+-_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
++_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503})
+ _HTTP_TOO_MANY_REQUESTS = 429
+ _MAX_RAW_MESSAGE_LEN = 500
+ 
+@@ -71,7 +71,7 @@
+     if dt is None:
+         return None
+     if dt.tzinfo is None:
+-        dt = dt.replace(tzinfo=UTC)
++        dt = dt.astimezone()
+     return max(0.0, (dt - datetime.now(UTC)).total_seconds())
+ 
+ 
+@@ -115,7 +115,7 @@
+                 await resp.aread()
+                 retry_after = _parse_retry_after(resp)
+                 if (
+-                    resp.status_code == _HTTP_TOO_MANY_REQUESTS
++                    resp.status_code in _RETRYABLE_STATUSES
+                     and retry_after is not None
+                     and self._bucket is not None
+                 ):
+@@ -135,7 +135,7 @@
+             return resp
+ 
+         retryer = AsyncRetrying(
+-            stop=stop_after_attempt(self._retry.max_attempts),
++            stop=stop_after_attempt(self._retry.max_attempts + 1),
+             wait=wait_exponential_jitter(
+                 initial=self._retry.initial_wait_sec,
+                 max=self._retry.max_wait_sec,
+@@ -207,7 +207,7 @@
+     transport = RetryingTransport(inner, bucket=bucket, retry=retry, scope=scope)
+     merged_headers: dict[str, str] = dict(headers or {})
+     if token:
+-        merged_headers.setdefault("Authorization", f"Bearer {token}")
++        merged_headers["Authorization"] = f"Bearer {token}"
+     return httpx.AsyncClient(
+         transport=transport,
+         base_url=base,
