@@ -41,6 +41,7 @@ Date: 2026-09-26. Swarm version 0.5.1.
 | **D** | `all -r 2 -m all -S claude-opus-5-5`: the full roster, 11 different models (4 Claude, 7 GPT), normal mode | 23 |
 | **E** | `all -r 2 -m "claude-opus-5-5@xhigh gpt-6-astra@xhigh" -S claude-fable-5-1@xhigh` with `SWARM_INHERIT_CONFIG=1` (the operator's own skills, plugins and MCP servers) and the `Skill` tool allowed | 5 |
 | **F** | `all -r 2 -m "gpt-6-astra@low gpt-6-astra@medium gpt-6-astra@high gpt-6-astra@xhigh gpt-6-astra@max" -S gpt-6-astra@high`: one model at five reasoning efforts | 11 |
+| **G** | `all -r 1 -m "claude-opus-5-5 gpt-6-astra" -S claude-sonnet-5`: two different models at default effort, no critique round, cheap judge | 3 |
 
 C2 and C3 change only the judge, so they isolate the judge's effect.
 
@@ -56,6 +57,7 @@ C2 and C3 change only the judge, so they isolate the judge's effect.
 | **D** `-m all`, opus judge | 10 | 0 | 1 | 13m11s | 13.73 (Claude 8.01 + OpenAI 5.72) |
 | **E** opus + astra @xhigh, fable judge | **11** | 0 | 7 | 24m14s | 11.69 (Claude 5.50 + OpenAI 6.19) |
 | **F** astra ×5 efforts, astra judge | 9 | 0 | 8 | 23m20s | 19.79 |
+| **G** opus + astra, `-r 1`, sonnet judge | 10 | 0 | 5 | 8m45s | 1.87 (Claude 0.91 + OpenAI 0.96) |
 | A ∪ B (union of the two solo lists) | **11** | 0 | 8 | 3m28s in parallel | 1.48 |
 
 Which seeded bugs each contestant found:
@@ -70,6 +72,7 @@ Which seeded bugs each contestant found:
 | D `-m all` | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | E duo @xhigh | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | F astra ×5 efforts | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | · | ✓ | ✓ |
+| G duo `-r 1` | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 S7 (a one-line `setdefault` → assignment) was found by nobody in any configuration. S1 was rejected explicitly by the opus judges ("only extra wake-ups, tokens are never granted early"), which is fair: it is a performance defect, not a correctness one. Counting S1 as debatable, D missed only S7. E is the only configuration whose final list kept S1 (as a latent, low-severity defect).
 
@@ -116,7 +119,9 @@ The union of round 1 covered 11 of 12 (all but S7). Claude models consistently c
 
 9. **Varying reasoning effort does not buy diversity.** F ran one model at five efforts. Recall rose from `low` to `high` and then stopped: `xhigh` equalled `high`, and `max` found one fewer. The lower efforts found a subset of what `high` found and nothing of their own, so the five workers shared one set of blind spots (S1, S7). This was the most expensive bug-hunt configuration ($19.79) and scored below a single `high` worker, because the same-model judge dropped S12.
 
-**Recommendation for bug hunts:** run 2–3 *different* strong models and merge their findings without a filtering tournament. Cheapest: solo runs merged by hand (A ∪ B, $1.48, 11/12). Best single artifact: the E duo with a strong judge ($11.69, 11/12 + 7 extra, one verified list). Use `all -m all` when a missed bug is expensive and cost is secondary. Avoid homogeneous mass swarms for recall-oriented tasks.
+10. **The cheap version of E keeps most of its value.** G dropped the critique round, used default efforts and a sonnet judge: 10/12 for $1.87 in under 9 minutes, versus 11/12 for $11.69 in 24 minutes. The one bug G lost (S1) was missed by the opus worker this time, which is run-to-run noise: opus found it solo and in E. The sonnet judge corrected line numbers and kept every worker finding. It could not execute anything: in read-only mode it tried to write a script file (heredoc and `Write`), which is denied, instead of `.venv/bin/python -c`.
+
+**Recommendation for bug hunts:** run 2–3 *different* strong models and merge their findings without a filtering tournament. Cheapest: solo runs merged by hand (A ∪ B, $1.48, 11/12). Default swarm recipe: G, `all -r 1` with two different strong models and a cheap judge ($1.87, 10/12, one merged list). Most thorough: the E duo ($11.69, 11/12 + 7 extra, every item re-run by the judge). Use `all -m all` when a missed bug is expensive and cost is secondary. Avoid homogeneous mass swarms for recall-oriented tasks.
 
 **Limitations:** one run per configuration (n = 1), one small fixture, and seeded bugs that are one-line edits. The ranking between A and B in particular is within run-to-run noise: inside D, the astra worker found ~7 seeded bugs versus 9 in its solo run.
 
